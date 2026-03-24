@@ -1,0 +1,37 @@
+@import "tailwindcss";
+
+@theme {
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-bg: #0a0a0b;
+  --color-card: #141417;
+  --color-accent: #00ff88;
+  --color-accent-dim: rgba(0, 255, 136, 0.1);
+  --color-border: #27272a;
+}
+
+@layer base {
+  body {
+    @apply bg-bg text-zinc-100 font-sans antialiased;
+  }
+}
+
+.glass-panel {
+  @apply bg-card border border-border rounded-xl overflow-hidden;
+}
+
+.data-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1rem;
+}
+
+.status-pulse {
+  @apply w-2 h-2 rounded-full;
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .5; }
+}
+
