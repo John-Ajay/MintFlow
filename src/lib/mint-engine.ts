@@ -61,13 +61,19 @@ export class MintEngine {
         // Fallback to common minting ABI if Etherscan is not available or not used
         abi = [
           "function mint(uint256 quantity) public payable",
+          "function mint() public payable",
           "function publicMint(uint256 quantity) public payable",
+          "function publicMint() public payable",
           "function claim(address receiver, uint256 quantity) public payable",
+          "function claim(uint256 quantity) public payable",
+          "function purchase(uint256 quantity) public payable",
           "function totalSupply() public view returns (uint256)",
           "function maxSupply() public view returns (uint256)",
           "function paused() public view returns (bool)",
           "function saleActive() public view returns (bool)",
-          "function price() public view returns (uint256)"
+          "function price() public view returns (uint256)",
+          "function cost() public view returns (uint256)",
+          "function MINT_PRICE() public view returns (uint256)"
         ];
       }
 
@@ -76,24 +82,35 @@ export class MintEngine {
 
       try {
         // Try to detect common fields
-        const [totalSupply, maxSupply, paused, price] = await Promise.allSettled([
+        const [totalSupply, maxSupply, paused, price, cost, mintPrice] = await Promise.allSettled([
           contract.totalSupply(),
           contract.maxSupply(),
           contract.paused(),
-          contract.price()
+          contract.price(),
+          contract.cost(),
+          contract.MINT_PRICE()
         ]);
 
         if (totalSupply.status === 'fulfilled') info.totalSupply = Number(totalSupply.value);
         if (maxSupply.status === 'fulfilled') info.maxSupply = Number(maxSupply.value);
         if (paused.status === 'fulfilled') info.isPaused = paused.value;
+        
+        // Price detection
         if (price.status === 'fulfilled') info.price = ethers.formatEther(price.value);
+        else if (cost.status === 'fulfilled') info.price = ethers.formatEther(cost.value);
+        else if (mintPrice.status === 'fulfilled') info.price = ethers.formatEther(mintPrice.value);
 
-        // Detect mint function
+        // Detect mint function and its signature
         const mintFunctions = ['mint', 'publicMint', 'claim', 'purchase'];
         for (const fn of mintFunctions) {
-          if (contract[fn]) {
-            info.mintFunction = fn;
-            break;
+          try {
+            const fragment = contract.interface.getFunction(fn);
+            if (fragment) {
+              info.mintFunction = fn;
+              break;
+            }
+          } catch (e) {
+            // Function might exist with different signature or not at all
           }
         }
       } catch (e) {
@@ -110,33 +127,80 @@ export class MintEngine {
   ): Promise<{ success: boolean; error?: string; gasEstimate?: bigint }> {
     try {
       const connectedWallet = wallet.connect(this.provider);
-      const contract = new ethers.Contract(params.contractAddress, params.manualAbi ? JSON.parse(params.manualAbi) : [
-        `function ${params.functionName}(uint256 quantity) public payable`
-      ], connectedWallet);
+      const abi = params.manualAbi ? JSON.parse(params.manualAbi) : [
+        `function ${params.functionName}(uint256 quantity) public payable`,
+        `function ${params.functionName}() public payable`,
+        `function ${params.functionName}(address receiver, uint256 quantity) public payable`
+      ];
+      const contract = new ethers.Contract(params.contractAddress, abi, connectedWallet);
+      const fragment = contract.interface.getFunction(params.functionName);
+      
+      if (!fragment) throw new Error(`Function ${params.functionName} not found in ABI`);
 
       const value = ethers.parseEther((parseFloat(params.mintPrice) * params.quantity).toString());
+      const args = this.prepareArgs(fragment, params, wallet.address);
       
       // Use staticCall for accurate simulation
-      await contract[params.functionName].staticCall(params.quantity, { value });
+      await contract[params.functionName].staticCall(...args, { value });
       
-      const gasEstimate = await contract[params.functionName].estimateGas(params.quantity, { value });
+      const gasEstimate = await contract[params.functionName].estimateGas(...args, { value });
       
       return { success: true, gasEstimate };
     } catch (error: any) {
-      const decodedError = this.decodeError(error);
+      const decodedError = this.decodeError(error, params.manualAbi);
       return { success: false, error: decodedError };
     }
   }
 
-  private decodeError(error: any): string {
-    const message = error.message || '';
+  private prepareArgs(fragment: ethers.FunctionFragment, params: MintParams, walletAddress: string): any[] {
+    const args: any[] = [];
+    fragment.inputs.forEach(input => {
+      if (input.name === 'quantity' || input.name === '_quantity' || input.name === 'amount' || input.name === '_amount') {
+        args.push(params.quantity);
+      } else if (input.type === 'address' && (input.name === 'receiver' || input.name === 'to' || input.name === '_to')) {
+        args.push(walletAddress);
+      } else if (input.type === 'uint256') {
+        // Default to quantity for unknown uint256 if it's the only one
+        if (fragment.inputs.length === 1) args.push(params.quantity);
+        else args.push(0); // Placeholder
+      }
+    });
+    return args;
+  }
+
+  private decodeError(error: any, abi?: string): string {
+    let message = error.message || '';
+    
+    // Try to decode custom errors if ABI is available
+    if (abi && error.data) {
+      try {
+        const iface = new ethers.Interface(JSON.parse(abi));
+        const decoded = iface.parseError(error.data);
+        if (decoded) {
+          return `Contract Error: ${decoded.name}(${decoded.args.join(', ')})`;
+        }
+      } catch (e) {
+        // Failed to decode custom error
+      }
+    }
+
     if (message.includes('insufficient funds')) return 'Insufficient funds for gas + price';
     if (message.includes('execution reverted')) {
       if (message.includes('sold out')) return 'Mint sold out';
       if (message.includes('paused')) return 'Minting is paused';
       if (message.includes('max supply')) return 'Exceeds max supply';
       if (message.includes('caller is not whitelisted')) return 'Not whitelisted';
-      return `Contract reverted: ${message.split('reverted: ')[1] || 'Unknown reason'}`;
+      if (message.includes('max per wallet')) return 'Max per wallet reached';
+      
+      const revertReason = message.split('reverted: ')[1];
+      if (revertReason) return `Contract reverted: ${revertReason.split('\n')[0]}`;
+      
+      // If we have raw data but couldn't decode it
+      if (error.data && error.data.startsWith('0x')) {
+        return `Contract reverted with raw data: ${error.data.slice(0, 10)}... (Try providing manual ABI)`;
+      }
+      
+      return 'Contract reverted: Unknown reason (Check if mint is live or if you are whitelisted)';
     }
     return message;
   }
@@ -172,9 +236,15 @@ export class MintEngine {
         onStatusUpdate({ status: 'executing' });
         
         const abi = params.manualAbi ? JSON.parse(params.manualAbi) : [
-          `function ${params.functionName}(uint256 quantity) public payable`
+          `function ${params.functionName}(uint256 quantity) public payable`,
+          `function ${params.functionName}() public payable`,
+          `function ${params.functionName}(address receiver, uint256 quantity) public payable`
         ];
         const contract = new ethers.Contract(params.contractAddress, abi, wallet);
+        const fragment = contract.interface.getFunction(params.functionName);
+        if (!fragment) throw new Error(`Function ${params.functionName} not found`);
+        
+        const args = this.prepareArgs(fragment, params, address);
         const value = ethers.parseEther(totalCost.toString());
 
         const feeData = await this.provider.getFeeData();
@@ -182,17 +252,18 @@ export class MintEngine {
         let maxPriorityFeePerGas = feeData.maxPriorityFeePerGas;
         
         if (params.gasPreference === 'aggressive') {
-          maxPriorityFeePerGas = (maxPriorityFeePerGas! * 200n) / 100n;
-          maxFeePerGas = (maxFeePerGas! * 150n) / 100n;
+          maxPriorityFeePerGas = (maxPriorityFeePerGas! * 250n) / 100n;
+          maxFeePerGas = (maxFeePerGas! * 200n) / 100n;
         } else if (params.gasPreference === 'standard') {
-          maxPriorityFeePerGas = (maxPriorityFeePerGas! * 120n) / 100n;
+          maxPriorityFeePerGas = (maxPriorityFeePerGas! * 150n) / 100n;
+          maxFeePerGas = (maxFeePerGas! * 120n) / 100n;
         }
 
-        const tx = await contract[params.functionName](params.quantity, {
+        const tx = await contract[params.functionName](...args, {
           value,
           maxFeePerGas,
           maxPriorityFeePerGas,
-          gasLimit: (sim.gasEstimate! * 130n) / 100n,
+          gasLimit: (sim.gasEstimate! * 150n) / 100n, // Increased buffer
         });
 
         onStatusUpdate({ txHash: tx.hash });
@@ -202,8 +273,8 @@ export class MintEngine {
         
         return tx.hash;
       } catch (error: any) {
-        const decodedError = this.decodeError(error);
-        if (attempt < retryCount && !decodedError.includes('Insufficient funds')) {
+        const decodedError = this.decodeError(error, params.manualAbi);
+        if (attempt < retryCount && !decodedError.includes('Insufficient funds') && !decodedError.includes('Max per wallet')) {
           attempt++;
           console.warn(`Retrying mint (attempt ${attempt})...`);
           await new Promise(r => setTimeout(r, 1000 * attempt));

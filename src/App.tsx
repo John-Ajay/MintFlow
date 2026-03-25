@@ -70,29 +70,47 @@ export default function App() {
     }]);
   };
 
+  const extractContractAddress = (input: string) => {
+    // Handle OpenSea URLs
+    // Example: https://opensea.io/collection/name/drop
+    // Or: https://opensea.io/assets/ethereum/0x.../1
+    const osRegex = /0x[a-fA-F0-9]{40}/;
+    const match = input.match(osRegex);
+    if (match) return match[0];
+    return input.trim();
+  };
+
   const analyzeContract = async () => {
-    if (!params.contractAddress) {
-      addLog('Enter contract address first', 'warning');
+    const address = extractContractAddress(params.contractAddress);
+    if (!address || !address.startsWith('0x')) {
+      addLog('Enter a valid contract address or OpenSea URL', 'warning');
       return;
     }
+    
+    setParams(prev => ({ ...prev, contractAddress: address }));
     setIsAnalyzing(true);
-    addLog(`Analyzing contract on ${params.network}...`, 'info');
+    addLog(`Analyzing contract ${address} on ${params.network}...`, 'info');
     try {
       const engine = new MintEngine(params.network);
-      const info = await engine.analyzeContract(params.contractAddress, params.manualAbi);
+      const info = await engine.analyzeContract(address, params.manualAbi);
       setContractInfo(info);
       
       if (info.mintFunction) {
         setParams(prev => ({ ...prev, functionName: info.mintFunction! }));
         addLog(`Detected mint function: ${info.mintFunction}`, 'success');
+      } else {
+        addLog('Could not auto-detect mint function. Please enter it manually.', 'warning');
       }
+      
       if (info.price) {
         setParams(prev => ({ ...prev, mintPrice: info.price! }));
         addLog(`Detected mint price: ${info.price} ETH`, 'success');
       }
+      
       if (info.isPaused) {
         addLog('Warning: Contract reports minting is PAUSED', 'warning');
       }
+      
       if (info.totalSupply !== undefined && info.maxSupply !== undefined) {
         addLog(`Supply: ${info.totalSupply} / ${info.maxSupply}`, 'info');
       }
