@@ -15,11 +15,12 @@ import {
   Activity,
   Globe,
   Plus,
-  Trash2
+  Trash2,
+  ExternalLink
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MintEngine } from './lib/mint-engine';
-import { MintParams, WalletStatus, MintLog, Network } from './types.ts';
+import { MintParams, WalletStatus, MintLog, Network, ContractInfo } from './types.ts';
 import { cn } from './lib/utils';
 
 export default function App() {
@@ -30,9 +31,12 @@ export default function App() {
     args: [],
     mintPrice: '0',
     quantity: 1,
-    gasPreference: 'standard'
+    gasPreference: 'standard',
+    manualAbi: ''
   });
 
+  const [contractInfo, setContractInfo] = useState<ContractInfo | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [privateKeys, setPrivateKeys] = useState<string>('');
   const [wallets, setWallets] = useState<WalletStatus[]>([]);
   const [logs, setLogs] = useState<MintLog[]>([]);
@@ -40,6 +44,17 @@ export default function App() {
   const [showSecurityWarning, setShowSecurityWarning] = useState(true);
 
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  const getExplorerUrl = (network: Network) => {
+    switch (network) {
+      case 'ethereum': return 'https://etherscan.io';
+      case 'polygon': return 'https://polygonscan.com';
+      case 'base': return 'https://basescan.org';
+      case 'arbitrum': return 'https://arbiscan.io';
+      case 'optimism': return 'https://optimistic.etherscan.io';
+      default: return 'https://etherscan.io';
+    }
+  };
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -53,6 +68,39 @@ export default function App() {
       type,
       wallet: wallet || 'System'
     }]);
+  };
+
+  const analyzeContract = async () => {
+    if (!params.contractAddress) {
+      addLog('Enter contract address first', 'warning');
+      return;
+    }
+    setIsAnalyzing(true);
+    addLog(`Analyzing contract on ${params.network}...`, 'info');
+    try {
+      const engine = new MintEngine(params.network);
+      const info = await engine.analyzeContract(params.contractAddress, params.manualAbi);
+      setContractInfo(info);
+      
+      if (info.mintFunction) {
+        setParams(prev => ({ ...prev, functionName: info.mintFunction! }));
+        addLog(`Detected mint function: ${info.mintFunction}`, 'success');
+      }
+      if (info.price) {
+        setParams(prev => ({ ...prev, mintPrice: info.price! }));
+        addLog(`Detected mint price: ${info.price} ETH`, 'success');
+      }
+      if (info.isPaused) {
+        addLog('Warning: Contract reports minting is PAUSED', 'warning');
+      }
+      if (info.totalSupply !== undefined && info.maxSupply !== undefined) {
+        addLog(`Supply: ${info.totalSupply} / ${info.maxSupply}`, 'info');
+      }
+    } catch (err: any) {
+      addLog(`Analysis failed: ${err.message}`, 'error');
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   const startMinting = async () => {
@@ -78,7 +126,7 @@ export default function App() {
     }));
     setWallets(initialWallets);
 
-    // Sequential execution for safety
+    // Controlled sequential execution
     for (let i = 0; i < keys.length; i++) {
       const key = keys[i];
       try {
@@ -90,12 +138,14 @@ export default function App() {
           });
           
           if (update.status === 'executing') addLog(`Executing mint for wallet ${i + 1}...`, 'info');
-          if (update.status === 'confirmed') addLog(`Mint confirmed for wallet ${i + 1}!`, 'success');
+          if (update.status === 'confirmed') addLog(`Mint confirmed for wallet ${i + 1}! Gas: ${update.gasUsed}`, 'success');
           if (update.status === 'failed') addLog(`Mint failed for wallet ${i + 1}: ${update.error}`, 'error');
         });
-      } catch (err) {
-        console.error(`Error with wallet ${i}:`, err);
+      } catch (err: any) {
+        addLog(`Wallet ${i + 1} fatal error: ${err.message}`, 'error');
       }
+      // Small delay between wallets to prevent RPC spam
+      await new Promise(r => setTimeout(r, 500));
     }
 
     setIsExecuting(false);
@@ -111,8 +161,8 @@ export default function App() {
             <Cpu className="w-8 h-8 text-accent" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">MINTFLOW <span className="text-accent text-xs font-mono ml-2">v1.0.4</span></h1>
-            <p className="text-zinc-500 text-sm">Autonomous Multi-Wallet Minting Agent</p>
+            <h1 className="text-2xl font-bold tracking-tight">MINTFLOW <span className="text-accent text-xs font-mono ml-2">v2.0.0</span></h1>
+            <p className="text-zinc-500 text-sm">Advanced Multi-Wallet Minting Agent</p>
           </div>
         </div>
         <div className="flex items-center gap-4">
@@ -162,9 +212,23 @@ export default function App() {
         <div className="lg:col-span-5 space-y-6">
           {/* Mint Parameters */}
           <section className="glass-panel p-6 space-y-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Settings className="w-4 h-4 text-accent" />
-              <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-400">Configuration</h2>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Settings className="w-4 h-4 text-accent" />
+                <h2 className="text-sm font-bold uppercase tracking-widest text-zinc-400">Configuration</h2>
+              </div>
+              {contractInfo && (
+                <div className="flex items-center gap-2 text-[10px] font-mono">
+                  <span className={cn(contractInfo.isPaused ? "text-red-500" : "text-accent")}>
+                    {contractInfo.isPaused ? "PAUSED" : "LIVE"}
+                  </span>
+                  {contractInfo.totalSupply !== undefined && (
+                    <span className="text-zinc-500">
+                      {contractInfo.totalSupply}/{contractInfo.maxSupply}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
             
             <div className="space-y-4">
@@ -185,12 +249,31 @@ export default function App() {
 
               <div className="space-y-2">
                 <label className="text-xs font-mono text-zinc-500 uppercase">Contract Address</label>
-                <input 
-                  type="text"
-                  placeholder="0x..."
-                  value={params.contractAddress}
-                  onChange={(e) => setParams({...params, contractAddress: e.target.value})}
-                  className="w-full bg-bg border border-border rounded-lg p-2.5 text-sm font-mono focus:outline-none focus:border-accent transition-colors"
+                <div className="flex gap-2">
+                  <input 
+                    type="text"
+                    placeholder="0x..."
+                    value={params.contractAddress}
+                    onChange={(e) => setParams({...params, contractAddress: e.target.value})}
+                    className="flex-1 bg-bg border border-border rounded-lg p-2.5 text-sm font-mono focus:outline-none focus:border-accent transition-colors"
+                  />
+                  <button 
+                    onClick={analyzeContract}
+                    disabled={isAnalyzing}
+                    className="px-4 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                  >
+                    {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : "ANALYZE"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-xs font-mono text-zinc-500 uppercase">Manual ABI (Optional)</label>
+                <textarea 
+                  placeholder='[{"inputs":[],"name":"mint",...}]'
+                  value={params.manualAbi}
+                  onChange={(e) => setParams({...params, manualAbi: e.target.value})}
+                  className="w-full h-20 bg-bg border border-border rounded-lg p-2.5 text-[10px] font-mono focus:outline-none focus:border-accent transition-colors resize-none"
                 />
               </div>
 
@@ -324,35 +407,40 @@ export default function App() {
                         <p className="text-xs font-mono text-zinc-300 truncate max-w-[150px] md:max-w-[250px]">
                           {wallet.address}
                         </p>
-                        <p className="text-[10px] text-zinc-500 font-mono">
-                          Balance: {wallet.balance} ETH
-                        </p>
+                        <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono">
+                          <span>Balance: {wallet.balance} ETH</span>
+                          {wallet.gasUsed && <span className="text-accent/60">Gas: {wallet.gasUsed}</span>}
+                          {wallet.txHash && (
+                            <a 
+                              href={`${getExplorerUrl(params.network)}/tx/${wallet.txHash}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-accent hover:underline flex items-center gap-1"
+                            >
+                              TX <ExternalLink className="w-2 h-2" />
+                            </a>
+                          )}
+                        </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-4">
-                      {wallet.txHash && (
-                        <a 
-                          href={`https://${params.network === 'ethereum' ? '' : params.network + '.'}etherscan.io/tx/${wallet.txHash}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[10px] font-mono text-accent hover:underline"
-                        >
-                          TXID
-                        </a>
+                    <div className="flex items-center gap-3">
+                      {wallet.status === 'skipped' && (
+                        <div className="px-2 py-0.5 bg-zinc-800 text-zinc-500 rounded text-[10px] font-mono uppercase">
+                          SKIPPED
+                        </div>
                       )}
-                      <div className="flex items-center gap-2">
-                        <span className={cn(
-                          "text-[10px] font-mono uppercase px-2 py-0.5 rounded",
-                          wallet.status === 'confirmed' && "bg-accent/10 text-accent",
-                          wallet.status === 'failed' && "bg-red-500/10 text-red-500",
-                          wallet.status === 'executing' && "bg-blue-500/10 text-blue-500",
-                          wallet.status === 'idle' && "bg-zinc-800 text-zinc-500"
-                        )}>
-                          {wallet.status}
-                        </span>
-                        {wallet.status === 'executing' && <Loader2 className="w-3 h-3 animate-spin text-blue-500" />}
-                        {wallet.status === 'confirmed' && <CheckCircle2 className="w-3 h-3 text-accent" />}
-                        {wallet.status === 'failed' && <XCircle className="w-3 h-3 text-red-500" />}
+                      <div className={cn(
+                        "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-2",
+                        wallet.status === 'confirmed' ? "bg-accent/10 text-accent" :
+                        wallet.status === 'failed' ? "bg-red-500/10 text-red-500" :
+                        wallet.status === 'executing' ? "bg-blue-500/10 text-blue-500" :
+                        wallet.status === 'preparing' ? "bg-zinc-800 text-zinc-400" :
+                        "bg-zinc-900 text-zinc-600"
+                      )}>
+                        {wallet.status}
+                        {wallet.status === 'executing' && <Loader2 className="w-3 h-3 animate-spin" />}
+                        {wallet.status === 'confirmed' && <CheckCircle2 className="w-3 h-3" />}
+                        {wallet.status === 'failed' && <XCircle className="w-3 h-3" />}
                       </div>
                     </div>
                   </div>

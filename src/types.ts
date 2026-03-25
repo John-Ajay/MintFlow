@@ -1,22 +1,34 @@
 export type Network = 'ethereum' | 'polygon' | 'base' | 'arbitrum' | 'optimism';
 
+export interface ContractInfo {
+  address: string;
+  abi: any[];
+  isVerified: boolean;
+  mintFunction?: string;
+  price?: string;
+  maxSupply?: number;
+  totalSupply?: number;
+  isPaused?: boolean;
+}
+
 export interface MintParams {
   contractAddress: string;
   network: Network;
   functionName: string;
-  args: string[];
-  mintPrice: string; // in ETH/Native
+  args: any[];
+  mintPrice: string;
   quantity: number;
   gasPreference: 'low' | 'standard' | 'aggressive';
-  scheduledTime?: Date;
+  manualAbi?: string;
 }
 
 export interface WalletStatus {
   address: string;
   balance: string;
-  status: 'idle' | 'preparing' | 'simulating' | 'executing' | 'confirmed' | 'failed';
+  status: 'idle' | 'preparing' | 'simulating' | 'executing' | 'confirmed' | 'failed' | 'skipped';
   txHash?: string;
   error?: string;
+  gasUsed?: string;
 }
 
 export interface MintLog {
