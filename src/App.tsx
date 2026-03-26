@@ -279,7 +279,7 @@ export default function App() {
                 <div className="flex gap-2">
                   <input 
                     type="text"
-                    placeholder="0x..."
+                    placeholder="0x... or OpenSea URL"
                     value={params.contractAddress}
                     onChange={(e) => setParams({...params, contractAddress: e.target.value})}
                     className="flex-1 bg-bg border border-border rounded-lg p-2.5 text-sm font-mono focus:outline-none focus:border-accent transition-colors"
@@ -293,6 +293,39 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {/* Eligibility Status */}
+              {contractInfo && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={cn(
+                    "p-3 rounded-lg border flex items-center justify-between",
+                    contractInfo.isPaused || (contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply)
+                      ? "bg-red-500/5 border-red-500/20"
+                      : "bg-accent/5 border-accent/20"
+                  )}
+                >
+                  <div className="flex items-center gap-2">
+                    <div className={cn(
+                      "w-2 h-2 rounded-full",
+                      contractInfo.isPaused || (contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply)
+                        ? "bg-red-500"
+                        : "bg-accent animate-pulse"
+                    )} />
+                    <span className="text-xs font-bold uppercase tracking-wider">
+                      {contractInfo.isPaused 
+                        ? "MINT PAUSED" 
+                        : (contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply)
+                          ? "SOLD OUT"
+                          : "ELIGIBLE TO MINT"}
+                    </span>
+                  </div>
+                  <div className="text-[10px] font-mono text-zinc-500">
+                    {contractInfo.price ? `${contractInfo.price} ${params.network === 'polygon' ? 'POL' : 'ETH'}` : "Price Unknown"}
+                  </div>
+                </motion.div>
+              )}
 
               <div className="space-y-2">
                 <label className="text-xs font-mono text-zinc-500 uppercase">Manual ABI (Optional)</label>

@@ -73,9 +73,14 @@ export class MintEngine {
           "function totalSupply() public view returns (uint256)",
           "function maxSupply() public view returns (uint256)",
           "function paused() public view returns (bool)",
+          "function isPaused() public view returns (bool)",
           "function saleActive() public view returns (bool)",
+          "function isSaleActive() public view returns (bool)",
           "function price() public view returns (uint256)",
           "function cost() public view returns (uint256)",
+          "function mintPrice() public view returns (uint256)",
+          "function publicPrice() public view returns (uint256)",
+          "function unitPrice() public view returns (uint256)",
           "function MINT_PRICE() public view returns (uint256)"
         ];
       }
@@ -84,24 +89,44 @@ export class MintEngine {
       const info: ContractInfo = { address, abi, isVerified: !!manualAbi };
 
       try {
-        // Try to detect common fields
-        const [totalSupply, maxSupply, paused, price, cost, mintPrice] = await Promise.allSettled([
+        // Try to detect common fields with expanded variations
+        const [
+          totalSupply, maxSupply, 
+          paused, isPaused, 
+          saleActive, isSaleActive,
+          price, cost, mintPrice, publicPrice, unitPrice, MINT_PRICE
+        ] = await Promise.allSettled([
           contract.totalSupply(),
           contract.maxSupply(),
           contract.paused(),
+          contract.isPaused(),
+          contract.saleActive(),
+          contract.isSaleActive(),
           contract.price(),
           contract.cost(),
+          contract.mintPrice(),
+          contract.publicPrice(),
+          contract.unitPrice(),
           contract.MINT_PRICE()
         ]);
 
         if (totalSupply.status === 'fulfilled') info.totalSupply = Number(totalSupply.value);
         if (maxSupply.status === 'fulfilled') info.maxSupply = Number(maxSupply.value);
-        if (paused.status === 'fulfilled') info.isPaused = paused.value;
         
-        // Price detection
-        if (price.status === 'fulfilled') info.price = ethers.formatEther(price.value);
-        else if (cost.status === 'fulfilled') info.price = ethers.formatEther(cost.value);
-        else if (mintPrice.status === 'fulfilled') info.price = ethers.formatEther(mintPrice.value);
+        // Paused detection
+        if (paused.status === 'fulfilled') info.isPaused = paused.value;
+        else if (isPaused.status === 'fulfilled') info.isPaused = isPaused.value;
+        else if (saleActive.status === 'fulfilled') info.isPaused = !saleActive.value;
+        else if (isSaleActive.status === 'fulfilled') info.isPaused = !isSaleActive.value;
+        
+        // Price detection (checking all variations)
+        const priceValues = [price, cost, mintPrice, publicPrice, unitPrice, MINT_PRICE];
+        for (const pVal of priceValues) {
+          if (pVal.status === 'fulfilled') {
+            info.price = ethers.formatEther(pVal.value);
+            break;
+          }
+        }
 
         // Detect mint function and its signature
         const mintFunctions = ['mint', 'publicMint', 'claim', 'purchase', 'purchaseWithAmount', 'purchaseFor'];
