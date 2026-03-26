@@ -1,0 +1,5 @@
+{
+  "name": "MintFlow: Web3 NFT Minting Agent",
+  "description": "An advanced multi-wallet NFT minting automation tool with gas optimization, transaction simulation, and real-time tracking.",
+  "requestFramePermissions": []
+}

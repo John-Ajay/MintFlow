@@ -133,8 +133,18 @@ export default function App() {
       return;
     }
 
+    if (contractInfo?.isPaused) {
+      addLog('Cannot mint: Contract is PAUSED', 'error');
+      return;
+    }
+
+    if (contractInfo?.totalSupply !== undefined && contractInfo?.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply) {
+      addLog('Cannot mint: Sold out', 'error');
+      return;
+    }
+
     setIsExecuting(true);
-    addLog(`Starting minting process on ${params.network}...`, 'info');
+    addLog(`Starting parallel minting for ${keys.length} wallets on ${params.network}...`, 'info');
 
     const engine = new MintEngine(params.network);
     const initialWallets: WalletStatus[] = keys.map(k => ({
@@ -144,9 +154,8 @@ export default function App() {
     }));
     setWallets(initialWallets);
 
-    // Controlled sequential execution
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
+    // Parallel execution for maximum speed
+    const mintPromises = keys.map(async (key, i) => {
       try {
         await engine.executeMint(key, params, (update) => {
           setWallets(prev => {
@@ -155,19 +164,19 @@ export default function App() {
             return next;
           });
           
-          if (update.status === 'executing') addLog(`Executing mint for wallet ${i + 1}...`, 'info');
-          if (update.status === 'confirmed') addLog(`Mint confirmed for wallet ${i + 1}! Gas: ${update.gasUsed}`, 'success');
-          if (update.status === 'failed') addLog(`Mint failed for wallet ${i + 1}: ${update.error}`, 'error');
+          if (update.status === 'executing') addLog(`Wallet ${i + 1}: Executing...`, 'info');
+          if (update.status === 'confirmed') addLog(`Wallet ${i + 1}: Confirmed! Gas: ${update.gasUsed}`, 'success');
+          if (update.status === 'failed') addLog(`Wallet ${i + 1}: Failed - ${update.error}`, 'error');
         });
       } catch (err: any) {
         addLog(`Wallet ${i + 1} fatal error: ${err.message}`, 'error');
       }
-      // Small delay between wallets to prevent RPC spam
-      await new Promise(r => setTimeout(r, 500));
-    }
+    });
+
+    await Promise.all(mintPromises);
 
     setIsExecuting(false);
-    addLog('Batch minting process completed.', 'info');
+    addLog('All parallel minting processes completed.', 'info');
   };
 
   return (

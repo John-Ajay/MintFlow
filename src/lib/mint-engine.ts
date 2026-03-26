@@ -66,6 +66,9 @@ export class MintEngine {
           "function publicMint() public payable",
           "function claim(address receiver, uint256 quantity) public payable",
           "function claim(uint256 quantity) public payable",
+          "function purchase() public payable",
+          "function purchaseWithAmount(uint256 amount) public payable",
+          "function purchaseFor(address user, uint256 amount) public payable",
           "function purchase(uint256 quantity) public payable",
           "function totalSupply() public view returns (uint256)",
           "function maxSupply() public view returns (uint256)",
@@ -101,11 +104,12 @@ export class MintEngine {
         else if (mintPrice.status === 'fulfilled') info.price = ethers.formatEther(mintPrice.value);
 
         // Detect mint function and its signature
-        const mintFunctions = ['mint', 'publicMint', 'claim', 'purchase'];
+        const mintFunctions = ['mint', 'publicMint', 'claim', 'purchase', 'purchaseWithAmount', 'purchaseFor'];
         for (const fn of mintFunctions) {
           try {
-            const fragment = contract.interface.getFunction(fn);
-            if (fragment) {
+            // Try to find any function that matches the name
+            const fragments = contract.interface.fragments.filter(f => f.type === 'function' && (f as ethers.FunctionFragment).name === fn);
+            if (fragments.length > 0) {
               info.mintFunction = fn;
               break;
             }
@@ -130,22 +134,35 @@ export class MintEngine {
       const abi = params.manualAbi ? JSON.parse(params.manualAbi) : [
         `function ${params.functionName}(uint256 quantity) public payable`,
         `function ${params.functionName}() public payable`,
-        `function ${params.functionName}(address receiver, uint256 quantity) public payable`
+        `function ${params.functionName}(address receiver, uint256 quantity) public payable`,
+        `function ${params.functionName}(uint256 amount) public payable`,
+        `function ${params.functionName}(address user, uint256 amount) public payable`
       ];
       const contract = new ethers.Contract(params.contractAddress, abi, connectedWallet);
-      const fragment = contract.interface.getFunction(params.functionName);
       
-      if (!fragment) throw new Error(`Function ${params.functionName} not found in ABI`);
+      // Handle ambiguity by picking the first matching fragment
+      const fragments = contract.interface.fragments.filter(f => f.type === 'function' && (f as ethers.FunctionFragment).name === params.functionName) as ethers.FunctionFragment[];
+      if (fragments.length === 0) throw new Error(`Function ${params.functionName} not found in ABI`);
 
       const value = ethers.parseEther((parseFloat(params.mintPrice) * params.quantity).toString());
-      const args = this.prepareArgs(fragment, params, wallet.address);
       
-      // Use staticCall for accurate simulation
-      await contract[params.functionName].staticCall(...args, { value });
+      // Try each fragment until one works or we run out
+      let lastError: any;
+      for (const fragment of fragments) {
+        try {
+          const args = this.prepareArgs(fragment, params, wallet.address);
+          // Use the full signature to avoid ambiguity
+          const signature = fragment.format();
+          await contract[signature].staticCall(...args, { value });
+          const gasEstimate = await contract[signature].estimateGas(...args, { value });
+          return { success: true, gasEstimate };
+        } catch (e) {
+          lastError = e;
+          continue;
+        }
+      }
       
-      const gasEstimate = await contract[params.functionName].estimateGas(...args, { value });
-      
-      return { success: true, gasEstimate };
+      throw lastError || new Error(`Failed to simulate any variant of ${params.functionName}`);
     } catch (error: any) {
       const decodedError = this.decodeError(error, params.manualAbi);
       return { success: false, error: decodedError };
@@ -155,9 +172,10 @@ export class MintEngine {
   private prepareArgs(fragment: ethers.FunctionFragment, params: MintParams, walletAddress: string): any[] {
     const args: any[] = [];
     fragment.inputs.forEach(input => {
-      if (input.name === 'quantity' || input.name === '_quantity' || input.name === 'amount' || input.name === '_amount') {
+      const name = (input.name || '').toLowerCase();
+      if (name === 'quantity' || name === '_quantity' || name === 'amount' || name === '_amount') {
         args.push(params.quantity);
-      } else if (input.type === 'address' && (input.name === 'receiver' || input.name === 'to' || input.name === '_to')) {
+      } else if (input.type === 'address' && (name === 'receiver' || name === 'to' || name === '_to' || name === 'user' || name === '_user')) {
         args.push(walletAddress);
       } else if (input.type === 'uint256') {
         // Default to quantity for unknown uint256 if it's the only one
@@ -185,6 +203,7 @@ export class MintEngine {
     }
 
     if (message.includes('insufficient funds')) return 'Insufficient funds for gas + price';
+    if (message.includes('ambiguous function description')) return 'Ambiguous function call: Multiple signatures found. Try providing manual ABI.';
     if (message.includes('execution reverted')) {
       if (message.includes('sold out')) return 'Mint sold out';
       if (message.includes('paused')) return 'Minting is paused';
@@ -238,14 +257,35 @@ export class MintEngine {
         const abi = params.manualAbi ? JSON.parse(params.manualAbi) : [
           `function ${params.functionName}(uint256 quantity) public payable`,
           `function ${params.functionName}() public payable`,
-          `function ${params.functionName}(address receiver, uint256 quantity) public payable`
+          `function ${params.functionName}(address receiver, uint256 quantity) public payable`,
+          `function ${params.functionName}(uint256 amount) public payable`,
+          `function ${params.functionName}(address user, uint256 amount) public payable`
         ];
         const contract = new ethers.Contract(params.contractAddress, abi, wallet);
-        const fragment = contract.interface.getFunction(params.functionName);
-        if (!fragment) throw new Error(`Function ${params.functionName} not found`);
         
-        const args = this.prepareArgs(fragment, params, address);
+        // Handle ambiguity by picking the first matching fragment
+        const fragments = contract.interface.fragments.filter(f => f.type === 'function' && (f as ethers.FunctionFragment).name === params.functionName) as ethers.FunctionFragment[];
+        if (fragments.length === 0) throw new Error(`Function ${params.functionName} not found`);
+        
+        // Find the fragment that worked during simulation
+        let workingFragment: ethers.FunctionFragment | null = null;
+        let workingArgs: any[] = [];
         const value = ethers.parseEther(totalCost.toString());
+
+        for (const fragment of fragments) {
+          try {
+            const args = this.prepareArgs(fragment, params, address);
+            const signature = fragment.format();
+            await contract[signature].staticCall(...args, { value });
+            workingFragment = fragment;
+            workingArgs = args;
+            break;
+          } catch (e) {
+            continue;
+          }
+        }
+
+        if (!workingFragment) throw new Error(`Failed to find a valid signature for ${params.functionName}`);
 
         const feeData = await this.provider.getFeeData();
         let maxFeePerGas = feeData.maxFeePerGas;
@@ -259,7 +299,8 @@ export class MintEngine {
           maxFeePerGas = (maxFeePerGas! * 120n) / 100n;
         }
 
-        const tx = await contract[params.functionName](...args, {
+        const signature = workingFragment.format();
+        const tx = await contract[signature](...workingArgs, {
           value,
           maxFeePerGas,
           maxPriorityFeePerGas,
