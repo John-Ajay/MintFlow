@@ -1,16 +1,5 @@
 export type Network = 'ethereum' | 'polygon' | 'base' | 'arbitrum' | 'optimism';
 
-export interface ContractInfo {
-  address: string;
-  abi: any[];
-  isVerified: boolean;
-  mintFunction?: string;
-  price?: string;
-  maxSupply?: number;
-  totalSupply?: number;
-  isPaused?: boolean;
-}
-
 export interface MintParams {
   contractAddress: string;
   network: Network;
@@ -19,7 +8,7 @@ export interface MintParams {
   mintPrice: string;
   quantity: number;
   gasPreference: 'low' | 'standard' | 'aggressive';
-  manualAbi?: string;
+  manualAbi: string;
 }
 
 export interface WalletStatus {
@@ -27,14 +16,46 @@ export interface WalletStatus {
   balance: string;
   status: 'idle' | 'preparing' | 'simulating' | 'executing' | 'confirmed' | 'failed' | 'skipped';
   txHash?: string;
-  error?: string;
   gasUsed?: string;
+  error?: string;
 }
 
 export interface MintLog {
   id: string;
   timestamp: Date;
-  wallet: string;
   message: string;
   type: 'info' | 'success' | 'error' | 'warning';
+  wallet?: string;
+}
+
+export interface GasInfo {
+  baseFeeGwei: string;
+  priorityFeeGwei: string;
+  totalGwei: string;
+}
+
+export interface ContractInfo {
+  address: string;
+  abi: any[];
+  isVerified: boolean;
+  mintFunction?: string;
+
+  // Price
+  price?: string;        // formatted ETH/POL string
+  priceWei?: string;     // raw wei string for display
+
+  // Supply
+  totalSupply?: number;
+  maxSupply?: number;
+
+  // State
+  isPaused?: boolean;
+  currentPhase?: string; // e.g. "Public Sale", "Presale", "Phase 2"
+
+  // Quantity limits
+  minQuantity?: number;
+  maxQuantity?: number;
+
+  // Live gas
+  gasInfo?: GasInfo;
 }

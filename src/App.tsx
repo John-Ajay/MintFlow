@@ -4,8 +4,6 @@ import {
   Wallet, 
   Zap, 
   Settings, 
-  Play, 
-  Pause, 
   AlertTriangle, 
   CheckCircle2, 
   XCircle, 
@@ -14,13 +12,16 @@ import {
   Cpu,
   Activity,
   Globe,
-  Plus,
   Trash2,
-  ExternalLink
+  ExternalLink,
+  Flame,
+  Layers,
+  Hash,
+  TrendingUp
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { MintEngine } from './lib/mint-engine';
-import { MintParams, WalletStatus, MintLog, Network, ContractInfo } from './types.ts';
+import { MintParams, WalletStatus, MintLog, Network, ContractInfo } from './types.tsx';
 import { cn } from './lib/utils';
 
 export default function App() {
@@ -56,6 +57,11 @@ export default function App() {
     }
   };
 
+  const nativeCurrency = (network: Network) => {
+    if (network === 'polygon') return 'POL';
+    return 'ETH';
+  };
+
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
@@ -70,50 +76,77 @@ export default function App() {
     }]);
   };
 
-  const extractContractAddress = (input: string) => {
-    // Handle OpenSea URLs
-    // Example: https://opensea.io/collection/name/drop
-    // Or: https://opensea.io/assets/ethereum/0x.../1
-    const osRegex = /0x[a-fA-F0-9]{40}/;
-    const match = input.match(osRegex);
-    if (match) return match[0];
-    return input.trim();
-  };
-
   const analyzeContract = async () => {
-    const address = extractContractAddress(params.contractAddress);
-    if (!address || !address.startsWith('0x')) {
-      addLog('Enter a valid contract address or OpenSea URL', 'warning');
+    const rawInput = params.contractAddress.trim();
+    if (!rawInput) {
+      addLog('Enter a contract address, OpenSea URL, or project mint URL', 'warning');
       return;
     }
-    
+
+    // Extract address from URL or use as-is
+    const address = MintEngine.extractContractAddress(rawInput);
+    if (!address.startsWith('0x') || address.length !== 42) {
+      addLog('Could not extract a valid 0x contract address from input', 'warning');
+      return;
+    }
+
+    // Update the input field to show the resolved address
     setParams(prev => ({ ...prev, contractAddress: address }));
     setIsAnalyzing(true);
+    setContractInfo(null);
     addLog(`Analyzing contract ${address} on ${params.network}...`, 'info');
+
     try {
       const engine = new MintEngine(params.network);
-      const info = await engine.analyzeContract(address, params.manualAbi);
+      const info = await engine.analyzeContract(address, params.manualAbi || undefined);
       setContractInfo(info);
-      
+
+      // ── Mint function ──────────────────────────────────────────────────
       if (info.mintFunction) {
         setParams(prev => ({ ...prev, functionName: info.mintFunction! }));
         addLog(`Detected mint function: ${info.mintFunction}`, 'success');
       } else {
-        addLog('Could not auto-detect mint function. Please enter it manually.', 'warning');
+        addLog('Could not auto-detect mint function — enter it manually', 'warning');
       }
-      
-      if (info.price) {
+
+      // ── Price ──────────────────────────────────────────────────────────
+      if (info.price !== undefined) {
         setParams(prev => ({ ...prev, mintPrice: info.price! }));
-        addLog(`Detected mint price: ${info.price} ETH`, 'success');
+        const curr = nativeCurrency(params.network);
+        addLog(`Mint price: ${info.price} ${curr} per token`, 'success');
+      } else {
+        addLog('Mint price not detected — enter manually', 'warning');
       }
-      
+
+      // ── Phase ──────────────────────────────────────────────────────────
+      if (info.currentPhase) {
+        addLog(`Active phase: ${info.currentPhase}`, 'info');
+      }
+
+      // ── Pause state ────────────────────────────────────────────────────
       if (info.isPaused) {
-        addLog('Warning: Contract reports minting is PAUSED', 'warning');
+        addLog('⚠ Minting is currently PAUSED / not active', 'warning');
+      } else {
+        addLog('Minting appears LIVE', 'success');
       }
-      
+
+      // ── Supply ─────────────────────────────────────────────────────────
       if (info.totalSupply !== undefined && info.maxSupply !== undefined) {
-        addLog(`Supply: ${info.totalSupply} / ${info.maxSupply}`, 'info');
+        const remaining = info.maxSupply - info.totalSupply;
+        addLog(`Supply: ${info.totalSupply} / ${info.maxSupply} minted (${remaining} remaining)`, 'info');
       }
+
+      // ── Quantity limits ────────────────────────────────────────────────
+      if (info.minQuantity !== undefined || info.maxQuantity !== undefined) {
+        addLog(`Quantity limits — min: ${info.minQuantity ?? 1}, max: ${info.maxQuantity ?? 'unlimited'} per tx`, 'info');
+        if (info.minQuantity) setParams(prev => ({ ...prev, quantity: info.minQuantity! }));
+      }
+
+      // ── Gas ────────────────────────────────────────────────────────────
+      if (info.gasInfo) {
+        addLog(`Gas — Base: ${info.gasInfo.baseFeeGwei} Gwei | Priority: ${info.gasInfo.priorityFeeGwei} Gwei | Total: ${info.gasInfo.totalGwei} Gwei`, 'info');
+      }
+
     } catch (err: any) {
       addLog(`Analysis failed: ${err.message}`, 'error');
     } finally {
@@ -127,34 +160,35 @@ export default function App() {
       addLog('No private keys provided', 'error');
       return;
     }
-
     if (!params.contractAddress) {
       addLog('Contract address is required', 'error');
       return;
     }
-
     if (contractInfo?.isPaused) {
       addLog('Cannot mint: Contract is PAUSED', 'error');
       return;
     }
-
-    if (contractInfo?.totalSupply !== undefined && contractInfo?.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply) {
+    if (
+      contractInfo?.totalSupply !== undefined &&
+      contractInfo?.maxSupply !== undefined &&
+      contractInfo.totalSupply >= contractInfo.maxSupply
+    ) {
       addLog('Cannot mint: Sold out', 'error');
       return;
     }
 
     setIsExecuting(true);
-    addLog(`Starting parallel minting for ${keys.length} wallets on ${params.network}...`, 'info');
+    addLog(`Starting parallel minting for ${keys.length} wallet${keys.length > 1 ? 's' : ''} on ${params.network}...`, 'info');
 
     const engine = new MintEngine(params.network);
-    const initialWallets: WalletStatus[] = keys.map(k => ({
+    const initialWallets: WalletStatus[] = keys.map(() => ({
       address: 'Initializing...',
       balance: '0',
       status: 'idle'
     }));
     setWallets(initialWallets);
 
-    // Parallel execution for maximum speed
+    // All wallets fire simultaneously
     const mintPromises = keys.map(async (key, i) => {
       try {
         await engine.executeMint(key, params, (update) => {
@@ -163,13 +197,14 @@ export default function App() {
             next[i] = { ...next[i], ...update };
             return next;
           });
-          
-          if (update.status === 'executing') addLog(`Wallet ${i + 1}: Executing...`, 'info');
-          if (update.status === 'confirmed') addLog(`Wallet ${i + 1}: Confirmed! Gas: ${update.gasUsed}`, 'success');
-          if (update.status === 'failed') addLog(`Wallet ${i + 1}: Failed - ${update.error}`, 'error');
+          if (update.status === 'preparing') addLog(`Wallet ${i + 1}: Preparing...`, 'info', `W${i + 1}`);
+          if (update.status === 'simulating') addLog(`Wallet ${i + 1}: Simulating tx...`, 'info', `W${i + 1}`);
+          if (update.status === 'executing') addLog(`Wallet ${i + 1}: Broadcasting tx...`, 'info', `W${i + 1}`);
+          if (update.status === 'confirmed') addLog(`Wallet ${i + 1}: ✓ Confirmed! Gas used: ${update.gasUsed}`, 'success', `W${i + 1}`);
+          if (update.status === 'failed') addLog(`Wallet ${i + 1}: ✗ Failed — ${update.error}`, 'error', `W${i + 1}`);
         });
       } catch (err: any) {
-        addLog(`Wallet ${i + 1} fatal error: ${err.message}`, 'error');
+        addLog(`Wallet ${i + 1} fatal error: ${err.message}`, 'error', `W${i + 1}`);
       }
     });
 
@@ -178,6 +213,13 @@ export default function App() {
     setIsExecuting(false);
     addLog('All parallel minting processes completed.', 'info');
   };
+
+  const isSoldOut =
+    contractInfo?.totalSupply !== undefined &&
+    contractInfo?.maxSupply !== undefined &&
+    contractInfo.totalSupply >= contractInfo.maxSupply;
+
+  const curr = nativeCurrency(params.network);
 
   return (
     <div className="min-h-screen p-4 md:p-8 max-w-7xl mx-auto space-y-6">
@@ -197,7 +239,7 @@ export default function App() {
             <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
             <span className="text-xs font-mono uppercase tracking-wider text-zinc-400">Network: {params.network}</span>
           </div>
-          <button 
+          <button
             onClick={() => setShowSecurityWarning(!showSecurityWarning)}
             className="p-2 hover:bg-zinc-800 rounded-lg transition-colors text-zinc-400"
           >
@@ -209,7 +251,7 @@ export default function App() {
       {/* Security Warning */}
       <AnimatePresence>
         {showSecurityWarning && (
-          <motion.div 
+          <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
@@ -220,9 +262,9 @@ export default function App() {
               <div className="space-y-1">
                 <h3 className="font-bold text-red-500">SECURITY PROTOCOL WARNING</h3>
                 <p className="text-sm text-zinc-400">
-                  This tool requires private keys for automated execution. 
-                  <span className="text-zinc-200 font-medium"> NEVER use your primary vault wallets.</span> 
-                  Always use fresh burner wallets with only the necessary funds for the mint. 
+                  This tool requires private keys for automated execution.
+                  <span className="text-zinc-200 font-medium"> NEVER use your primary vault wallets.</span>{' '}
+                  Always use fresh burner wallets with only the necessary funds for the mint.
                   Keys are handled only in memory and never stored, but your browser environment is your responsibility.
                 </p>
               </div>
@@ -235,9 +277,9 @@ export default function App() {
       </AnimatePresence>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left Column: Configuration */}
+        {/* ── Left Column ─────────────────────────────────────────────────── */}
         <div className="lg:col-span-5 space-y-6">
-          {/* Mint Parameters */}
+          {/* Configuration */}
           <section className="glass-panel p-6 space-y-4">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
@@ -246,24 +288,30 @@ export default function App() {
               </div>
               {contractInfo && (
                 <div className="flex items-center gap-2 text-[10px] font-mono">
-                  <span className={cn(contractInfo.isPaused ? "text-red-500" : "text-accent")}>
-                    {contractInfo.isPaused ? "PAUSED" : "LIVE"}
+                  <span className={cn(contractInfo.isPaused || isSoldOut ? "text-red-500" : "text-accent")}>
+                    {isSoldOut ? "SOLD OUT" : contractInfo.isPaused ? "PAUSED" : "LIVE"}
                   </span>
+                  {contractInfo.currentPhase && (
+                    <span className="text-zinc-500 border border-zinc-700 px-1.5 py-0.5 rounded">
+                      {contractInfo.currentPhase}
+                    </span>
+                  )}
                   {contractInfo.totalSupply !== undefined && (
-                    <span className="text-zinc-500">
-                      {contractInfo.totalSupply}/{contractInfo.maxSupply}
+                    <span className="text-zinc-600">
+                      {contractInfo.totalSupply}/{contractInfo.maxSupply ?? '?'}
                     </span>
                   )}
                 </div>
               )}
             </div>
-            
+
             <div className="space-y-4">
+              {/* Network */}
               <div className="space-y-2">
                 <label className="text-xs font-mono text-zinc-500 uppercase">Target Network</label>
-                <select 
+                <select
                   value={params.network}
-                  onChange={(e) => setParams({...params, network: e.target.value as Network})}
+                  onChange={(e) => setParams({ ...params, network: e.target.value as Network })}
                   className="w-full bg-bg border border-border rounded-lg p-2.5 text-sm focus:outline-none focus:border-accent transition-colors"
                 >
                   <option value="ethereum">Ethereum Mainnet</option>
@@ -274,108 +322,196 @@ export default function App() {
                 </select>
               </div>
 
+              {/* Contract Address / URL */}
               <div className="space-y-2">
-                <label className="text-xs font-mono text-zinc-500 uppercase">Contract Address</label>
+                <label className="text-xs font-mono text-zinc-500 uppercase">Contract Address / OpenSea URL / Mint Link</label>
                 <div className="flex gap-2">
-                  <input 
+                  <input
                     type="text"
-                    placeholder="0x... or OpenSea URL"
+                    placeholder="0x... or https://opensea.io/... or project mint URL"
                     value={params.contractAddress}
-                    onChange={(e) => setParams({...params, contractAddress: e.target.value})}
+                    onChange={(e) => setParams({ ...params, contractAddress: e.target.value })}
                     className="flex-1 bg-bg border border-border rounded-lg p-2.5 text-sm font-mono focus:outline-none focus:border-accent transition-colors"
                   />
-                  <button 
+                  <button
                     onClick={analyzeContract}
                     disabled={isAnalyzing}
-                    className="px-4 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold transition-colors disabled:opacity-50"
+                    className="px-4 bg-zinc-800 hover:bg-zinc-700 rounded-lg text-xs font-bold transition-colors disabled:opacity-50 whitespace-nowrap"
                   >
-                    {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : "ANALYZE"}
+                    {isAnalyzing ? <Loader2 className="w-4 h-4 animate-spin" /> : 'ANALYZE'}
                   </button>
                 </div>
+                <p className="text-[10px] text-zinc-600 font-mono">
+                  Accepts raw 0x address, OpenSea URL, or any mint page URL containing a contract address
+                </p>
               </div>
 
-              {/* Eligibility Status */}
-              {contractInfo && (
-                <motion.div 
-                  initial={{ opacity: 0, y: -10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className={cn(
-                    "p-3 rounded-lg border flex items-center justify-between",
-                    contractInfo.isPaused || (contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply)
-                      ? "bg-red-500/5 border-red-500/20"
-                      : "bg-accent/5 border-accent/20"
-                  )}
-                >
-                  <div className="flex items-center gap-2">
+              {/* ── Analyzed Info Cards ───────────────────────────────────── */}
+              <AnimatePresence>
+                {contractInfo && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="space-y-2"
+                  >
+                    {/* Status + Phase */}
                     <div className={cn(
-                      "w-2 h-2 rounded-full",
-                      contractInfo.isPaused || (contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply)
-                        ? "bg-red-500"
-                        : "bg-accent animate-pulse"
-                    )} />
-                    <span className="text-xs font-bold uppercase tracking-wider">
-                      {contractInfo.isPaused 
-                        ? "MINT PAUSED" 
-                        : (contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && contractInfo.totalSupply >= contractInfo.maxSupply)
-                          ? "SOLD OUT"
-                          : "ELIGIBLE TO MINT"}
-                    </span>
-                  </div>
-                  <div className="text-[10px] font-mono text-zinc-500">
-                    {contractInfo.price ? `${contractInfo.price} ${params.network === 'polygon' ? 'POL' : 'ETH'}` : "Price Unknown"}
-                  </div>
-                </motion.div>
-              )}
+                      "p-3 rounded-lg border flex items-center justify-between",
+                      contractInfo.isPaused || isSoldOut
+                        ? "bg-red-500/5 border-red-500/20"
+                        : "bg-accent/5 border-accent/20"
+                    )}>
+                      <div className="flex items-center gap-2">
+                        <div className={cn(
+                          "w-2 h-2 rounded-full",
+                          contractInfo.isPaused || isSoldOut ? "bg-red-500" : "bg-accent animate-pulse"
+                        )} />
+                        <span className="text-xs font-bold uppercase tracking-wider">
+                          {isSoldOut ? 'SOLD OUT' : contractInfo.isPaused ? 'MINT PAUSED' : 'ELIGIBLE TO MINT'}
+                        </span>
+                        {contractInfo.currentPhase && (
+                          <span className="text-[10px] font-mono text-zinc-500 ml-2">· {contractInfo.currentPhase}</span>
+                        )}
+                      </div>
+                      {contractInfo.price !== undefined && (
+                        <div className="text-[10px] font-mono text-zinc-400">
+                          {parseFloat(contractInfo.price) === 0 ? 'FREE' : `${contractInfo.price} ${curr}`}
+                        </div>
+                      )}
+                    </div>
 
+                    {/* Info grid: Price · Gas · Qty · Supply */}
+                    <div className="grid grid-cols-2 gap-2">
+                      {/* Mint Price */}
+                      <div className="p-2.5 bg-bg/60 border border-border rounded-lg space-y-1">
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono uppercase">
+                          <Layers className="w-3 h-3" />
+                          Mint Price
+                        </div>
+                        <p className="text-sm font-bold font-mono text-zinc-200">
+                          {contractInfo.price !== undefined
+                            ? parseFloat(contractInfo.price) === 0
+                              ? 'FREE'
+                              : `${contractInfo.price} ${curr}`
+                            : '—'}
+                        </p>
+                        {contractInfo.priceWei && parseFloat(contractInfo.price ?? '0') > 0 && (
+                          <p className="text-[10px] text-zinc-600 font-mono truncate">
+                            {contractInfo.priceWei} wei
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Gas */}
+                      <div className="p-2.5 bg-bg/60 border border-border rounded-lg space-y-1">
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono uppercase">
+                          <Flame className="w-3 h-3" />
+                          Gas (Gwei)
+                        </div>
+                        {contractInfo.gasInfo ? (
+                          <>
+                            <p className="text-sm font-bold font-mono text-zinc-200">
+                              {contractInfo.gasInfo.totalGwei} Gwei
+                            </p>
+                            <p className="text-[10px] text-zinc-600 font-mono">
+                              Base {contractInfo.gasInfo.baseFeeGwei} + Tip {contractInfo.gasInfo.priorityFeeGwei}
+                            </p>
+                          </>
+                        ) : (
+                          <p className="text-sm font-bold font-mono text-zinc-500">—</p>
+                        )}
+                      </div>
+
+                      {/* Quantity Limits */}
+                      <div className="p-2.5 bg-bg/60 border border-border rounded-lg space-y-1">
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono uppercase">
+                          <Hash className="w-3 h-3" />
+                          Qty Limits
+                        </div>
+                        <p className="text-sm font-bold font-mono text-zinc-200">
+                          {contractInfo.minQuantity ?? 1} – {contractInfo.maxQuantity ?? '∞'}
+                        </p>
+                        <p className="text-[10px] text-zinc-600 font-mono">min – max per tx</p>
+                      </div>
+
+                      {/* Supply */}
+                      <div className="p-2.5 bg-bg/60 border border-border rounded-lg space-y-1">
+                        <div className="flex items-center gap-1.5 text-[10px] text-zinc-500 font-mono uppercase">
+                          <TrendingUp className="w-3 h-3" />
+                          Supply
+                        </div>
+                        <p className="text-sm font-bold font-mono text-zinc-200">
+                          {contractInfo.totalSupply ?? '?'} / {contractInfo.maxSupply ?? '?'}
+                        </p>
+                        {contractInfo.totalSupply !== undefined && contractInfo.maxSupply !== undefined && (
+                          <p className="text-[10px] text-zinc-600 font-mono">
+                            {contractInfo.maxSupply - contractInfo.totalSupply} remaining
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Manual ABI */}
               <div className="space-y-2">
                 <label className="text-xs font-mono text-zinc-500 uppercase">Manual ABI (Optional)</label>
-                <textarea 
+                <textarea
                   placeholder='[{"inputs":[],"name":"mint",...}]'
                   value={params.manualAbi}
-                  onChange={(e) => setParams({...params, manualAbi: e.target.value})}
+                  onChange={(e) => setParams({ ...params, manualAbi: e.target.value })}
                   className="w-full h-20 bg-bg border border-border rounded-lg p-2.5 text-[10px] font-mono focus:outline-none focus:border-accent transition-colors resize-none"
                 />
               </div>
 
+              {/* Function + Quantity */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-xs font-mono text-zinc-500 uppercase">Function Name</label>
-                  <input 
+                  <input
                     type="text"
                     placeholder="mint"
                     value={params.functionName}
-                    onChange={(e) => setParams({...params, functionName: e.target.value})}
+                    onChange={(e) => setParams({ ...params, functionName: e.target.value })}
                     className="w-full bg-bg border border-border rounded-lg p-2.5 text-sm font-mono focus:outline-none focus:border-accent transition-colors"
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-xs font-mono text-zinc-500 uppercase">Quantity</label>
-                  <input 
+                  <label className="text-xs font-mono text-zinc-500 uppercase">
+                    Quantity
+                    {contractInfo?.minQuantity !== undefined && contractInfo?.maxQuantity !== undefined && (
+                      <span className="ml-1 text-zinc-600">(min {contractInfo.minQuantity} · max {contractInfo.maxQuantity})</span>
+                    )}
+                  </label>
+                  <input
                     type="number"
-                    min="1"
+                    min={contractInfo?.minQuantity ?? 1}
+                    max={contractInfo?.maxQuantity ?? undefined}
                     value={params.quantity}
-                    onChange={(e) => setParams({...params, quantity: parseInt(e.target.value)})}
+                    onChange={(e) => setParams({ ...params, quantity: parseInt(e.target.value) || 1 })}
                     className="w-full bg-bg border border-border rounded-lg p-2.5 text-sm focus:outline-none focus:border-accent transition-colors"
                   />
                 </div>
               </div>
 
+              {/* Price + Gas */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-xs font-mono text-zinc-500 uppercase">Price (Native)</label>
-                  <input 
+                  <input
                     type="text"
                     placeholder="0.05"
                     value={params.mintPrice}
-                    onChange={(e) => setParams({...params, mintPrice: e.target.value})}
+                    onChange={(e) => setParams({ ...params, mintPrice: e.target.value })}
                     className="w-full bg-bg border border-border rounded-lg p-2.5 text-sm font-mono focus:outline-none focus:border-accent transition-colors"
                   />
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-mono text-zinc-500 uppercase">Gas Strategy</label>
-                  <select 
+                  <select
                     value={params.gasPreference}
-                    onChange={(e) => setParams({...params, gasPreference: e.target.value as any})}
+                    onChange={(e) => setParams({ ...params, gasPreference: e.target.value as any })}
                     className="w-full bg-bg border border-border rounded-lg p-2.5 text-sm focus:outline-none focus:border-accent transition-colors"
                   >
                     <option value="low">Low (Patient)</option>
@@ -387,7 +523,7 @@ export default function App() {
             </div>
           </section>
 
-          {/* Wallet Input */}
+          {/* Wallets */}
           <section className="glass-panel p-6 space-y-4">
             <div className="flex items-center justify-between mb-2">
               <div className="flex items-center gap-2">
@@ -396,21 +532,21 @@ export default function App() {
               </div>
               <span className="text-[10px] font-mono text-zinc-600">ONE PRIVATE KEY PER LINE</span>
             </div>
-            
-            <textarea 
+
+            <textarea
               value={privateKeys}
               onChange={(e) => setPrivateKeys(e.target.value)}
-              placeholder="Enter private keys..."
+              placeholder="Enter private keys (one per line)..."
               className="w-full h-40 bg-bg border border-border rounded-lg p-3 text-xs font-mono focus:outline-none focus:border-accent transition-colors resize-none"
             />
-            
-            <button 
+
+            <button
               onClick={startMinting}
               disabled={isExecuting}
               className={cn(
                 "w-full py-3 rounded-lg font-bold flex items-center justify-center gap-2 transition-all",
-                isExecuting 
-                  ? "bg-zinc-800 text-zinc-500 cursor-not-allowed" 
+                isExecuting
+                  ? "bg-zinc-800 text-zinc-500 cursor-not-allowed"
                   : "bg-accent text-bg hover:shadow-[0_0_20px_rgba(0,255,136,0.3)] active:scale-[0.98]"
               )}
             >
@@ -429,9 +565,9 @@ export default function App() {
           </section>
         </div>
 
-        {/* Right Column: Execution & Logs */}
+        {/* ── Right Column ─────────────────────────────────────────────────── */}
         <div className="lg:col-span-7 space-y-6">
-          {/* Live Status Grid */}
+          {/* Execution Status */}
           <section className="glass-panel p-6 min-h-[300px] flex flex-col">
             <div className="flex items-center justify-between mb-6">
               <div className="flex items-center gap-2">
@@ -452,13 +588,16 @@ export default function App() {
 
             <div className="flex-1 space-y-3 overflow-y-auto max-h-[400px] pr-2 custom-scrollbar">
               {wallets.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2">
+                <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2 py-12">
                   <Terminal className="w-12 h-12 opacity-20" />
                   <p className="text-xs font-mono">WAITING FOR INITIALIZATION...</p>
                 </div>
               ) : (
                 wallets.map((wallet, idx) => (
-                  <div key={idx} className="p-3 bg-bg/50 border border-border rounded-lg flex items-center justify-between group hover:border-accent/30 transition-colors">
+                  <div
+                    key={idx}
+                    className="p-3 bg-bg/50 border border-border rounded-lg flex items-center justify-between group hover:border-accent/30 transition-colors"
+                  >
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded bg-zinc-900 border border-border flex items-center justify-center text-[10px] font-mono text-zinc-500">
                         {idx + 1}
@@ -468,10 +607,10 @@ export default function App() {
                           {wallet.address}
                         </p>
                         <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono">
-                          <span>Balance: {wallet.balance} ETH</span>
+                          <span>Balance: {wallet.balance} {curr}</span>
                           {wallet.gasUsed && <span className="text-accent/60">Gas: {wallet.gasUsed}</span>}
                           {wallet.txHash && (
-                            <a 
+                            <a
                               href={`${getExplorerUrl(params.network)}/tx/${wallet.txHash}`}
                               target="_blank"
                               rel="noopener noreferrer"
@@ -483,25 +622,21 @@ export default function App() {
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-3">
-                      {wallet.status === 'skipped' && (
-                        <div className="px-2 py-0.5 bg-zinc-800 text-zinc-500 rounded text-[10px] font-mono uppercase">
-                          SKIPPED
-                        </div>
+                    <div className={cn(
+                      "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1.5",
+                      wallet.status === 'confirmed' ? "bg-accent/10 text-accent" :
+                      wallet.status === 'failed' ? "bg-red-500/10 text-red-500" :
+                      wallet.status === 'executing' ? "bg-blue-500/10 text-blue-500" :
+                      wallet.status === 'simulating' ? "bg-yellow-500/10 text-yellow-500" :
+                      wallet.status === 'preparing' ? "bg-zinc-800 text-zinc-400" :
+                      "bg-zinc-900 text-zinc-600"
+                    )}>
+                      {wallet.status}
+                      {(wallet.status === 'executing' || wallet.status === 'simulating' || wallet.status === 'preparing') && (
+                        <Loader2 className="w-3 h-3 animate-spin" />
                       )}
-                      <div className={cn(
-                        "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-2",
-                        wallet.status === 'confirmed' ? "bg-accent/10 text-accent" :
-                        wallet.status === 'failed' ? "bg-red-500/10 text-red-500" :
-                        wallet.status === 'executing' ? "bg-blue-500/10 text-blue-500" :
-                        wallet.status === 'preparing' ? "bg-zinc-800 text-zinc-400" :
-                        "bg-zinc-900 text-zinc-600"
-                      )}>
-                        {wallet.status}
-                        {wallet.status === 'executing' && <Loader2 className="w-3 h-3 animate-spin" />}
-                        {wallet.status === 'confirmed' && <CheckCircle2 className="w-3 h-3" />}
-                        {wallet.status === 'failed' && <XCircle className="w-3 h-3" />}
-                      </div>
+                      {wallet.status === 'confirmed' && <CheckCircle2 className="w-3 h-3" />}
+                      {wallet.status === 'failed' && <XCircle className="w-3 h-3" />}
                     </div>
                   </div>
                 ))
@@ -509,17 +644,14 @@ export default function App() {
             </div>
           </section>
 
-          {/* Console Logs */}
+          {/* Console */}
           <section className="glass-panel bg-black/40 border-zinc-800 flex flex-col h-[300px]">
             <div className="p-3 border-b border-zinc-800 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Terminal className="w-3 h-3 text-zinc-500" />
                 <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest">System Console</span>
               </div>
-              <button 
-                onClick={() => setLogs([])}
-                className="text-[10px] font-mono text-zinc-600 hover:text-zinc-400"
-              >
+              <button onClick={() => setLogs([])} className="text-[10px] font-mono text-zinc-600 hover:text-zinc-400">
                 CLEAR
               </button>
             </div>
@@ -557,25 +689,14 @@ export default function App() {
             <span>ENCRYPTION: AES-256</span>
           </div>
         </div>
-        <div>
-          © 2026 MINTFLOW PROTOCOL
-        </div>
+        <div>© 2026 MINTFLOW PROTOCOL</div>
       </footer>
 
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #27272a;
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: #3f3f46;
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #27272a; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
       `}</style>
     </div>
   );
