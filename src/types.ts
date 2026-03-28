@@ -41,8 +41,8 @@ export interface ContractInfo {
   mintFunction?: string;
 
   // Price
-  price?: string;        // formatted ETH/POL string
-  priceWei?: string;     // raw wei string for display
+  price?: string;
+  priceWei?: string;
 
   // Supply
   totalSupply?: number;
@@ -50,7 +50,7 @@ export interface ContractInfo {
 
   // State
   isPaused?: boolean;
-  currentPhase?: string; // e.g. "Public Sale", "Presale", "Phase 2"
+  currentPhase?: string;
 
   // Quantity limits
   minQuantity?: number;
@@ -58,4 +58,9 @@ export interface ContractInfo {
 
   // Live gas
   gasInfo?: GasInfo;
+
+  // SeaDrop
+  isSeaDrop?: boolean;
+  seaDropAddress?: string;
+  seaDropFeeRecipient?: string;
 }

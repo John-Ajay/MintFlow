@@ -9,9 +9,30 @@ const RPC_URLS: Record<Network, string[]> = {
   optimism: ['https://mainnet.optimism.io', 'https://optimism.llamarpc.com', 'https://rpc.ankr.com/optimism'],
 };
 
+// ─── SeaDrop contract addresses per network ───────────────────────────────────
+const SEADROP_ADDRESSES: Partial<Record<Network, string>> = {
+  ethereum: '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5',
+  base:     '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5',
+  optimism: '0x00005EA00Ac477B1030CE78506496e8C2dE24bf5',
+};
+
+// SeaDrop contract ABI — only what we need
+const SEADROP_ABI = [
+  "function getPublicDrop(address nftContract) external view returns (tuple(uint80 mintPrice, uint48 startTime, uint48 endTime, uint16 maxTotalMintableByWallet, uint16 feeBps, bool restrictFeeRecipients) publicDrop)",
+  "function getFeeRecipients(address nftContract) external view returns (address[])",
+  "function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity) external payable",
+];
+
+// NFT contract side — SeaDrop-specific read functions
+const SEADROP_NFT_ABI = [
+  "function getMintStats(address minter) external view returns (uint256 minterNumMinted, uint256 currentTotalSupply, uint256 maxSupply)",
+  "function maxSupply() public view returns (uint256)",
+  "function totalSupply() public view returns (uint256)",
+  "function paused() public view returns (bool)",
+];
+
 // Extended ABI covering ERC721A, Manifold, ThirdWeb, Zora, custom drops, and phased minting
 const COMMON_MINT_ABI = [
-  // ── Mint / Claim functions ──────────────────────────────────────────────
   "function mint(uint256 quantity) public payable",
   "function mint() public payable",
   "function mint(address to, uint256 quantity) public payable",
@@ -28,8 +49,6 @@ const COMMON_MINT_ABI = [
   "function buy(uint256 quantity) public payable",
   "function freeMint(uint256 quantity) public",
   "function mintFree() public",
-
-  // ── Supply ──────────────────────────────────────────────────────────────
   "function totalSupply() public view returns (uint256)",
   "function maxSupply() public view returns (uint256)",
   "function MAX_SUPPLY() public view returns (uint256)",
@@ -37,8 +56,6 @@ const COMMON_MINT_ABI = [
   "function _totalMinted() public view returns (uint256)",
   "function collectionSize() public view returns (uint256)",
   "function maxTokens() public view returns (uint256)",
-
-  // ── Pause / Sale state ──────────────────────────────────────────────────
   "function paused() public view returns (bool)",
   "function isPaused() public view returns (bool)",
   "function saleActive() public view returns (bool)",
@@ -47,8 +64,6 @@ const COMMON_MINT_ABI = [
   "function isPublicSaleActive() public view returns (bool)",
   "function mintingEnabled() public view returns (bool)",
   "function mintEnabled() public view returns (bool)",
-
-  // ── Price ───────────────────────────────────────────────────────────────
   "function price() public view returns (uint256)",
   "function cost() public view returns (uint256)",
   "function mintPrice() public view returns (uint256)",
@@ -60,8 +75,6 @@ const COMMON_MINT_ABI = [
   "function salePrice() public view returns (uint256)",
   "function pricePerToken() public view returns (uint256)",
   "function priceInWei() public view returns (uint256)",
-
-  // ── Quantity limits ─────────────────────────────────────────────────────
   "function maxPerWallet() public view returns (uint256)",
   "function maxMintPerWallet() public view returns (uint256)",
   "function walletLimit() public view returns (uint256)",
@@ -73,12 +86,9 @@ const COMMON_MINT_ABI = [
   "function MAX_PER_WALLET() public view returns (uint256)",
   "function MAX_PER_TX() public view returns (uint256)",
   "function mintLimit() public view returns (uint256)",
-
-  // ── ThirdWeb ClaimCondition phase (getActiveClaimCondition) ────────────
+  "function getMintStats(address minter) external view returns (uint256 minterNumMinted, uint256 currentTotalSupply, uint256 maxSupply)",
   "function getActiveClaimConditionId() public view returns (uint256)",
   "function getClaimConditionById(uint256 conditionId) public view returns (tuple(uint256 startTimestamp, uint256 maxClaimableSupply, uint256 supplyClaimed, uint256 quantityLimitPerWallet, bytes32 merkleRoot, uint256 pricePerToken, address currency, string metadata))",
-
-  // ── Zora / Edition style ────────────────────────────────────────────────
   "function saleDetails() public view returns (tuple(bool publicSaleActive, bool presaleActive, uint256 publicSalePrice, uint64 publicSaleStart, uint64 publicSaleEnd, uint64 presaleStart, uint64 presaleEnd, bytes32 presaleMerkleRoot, uint256 maxSalePurchasePerAddress, uint256 totalMinted, uint256 maxSupply))",
   "function zoraFeeForAmount(uint256 quantity) public view returns (address recipient, uint256 fee)",
 ];
@@ -121,12 +131,6 @@ export class MintEngine {
     });
   }
 
-  // ─── URL / address extraction ────────────────────────────────────────────────
-  // Supports:
-  //   • Raw 0x address
-  //   • OpenSea: https://opensea.io/assets/ethereum/0x.../1
-  //   • OpenSea drop: https://opensea.io/collection/*/drop
-  //   • Any project mint site that embeds a 0x address in the URL path/query
   static extractContractAddress(input: string): string {
     const hex40 = /0x[a-fA-F0-9]{40}/;
     const match = input.match(hex40);
@@ -134,41 +138,119 @@ export class MintEngine {
     return input.trim();
   }
 
-  // ─── Fetch live gas in Gwei ──────────────────────────────────────────────────
   async getGasInfo(): Promise<{ baseFeeGwei: string; priorityFeeGwei: string; totalGwei: string }> {
     return this.callWithRetry(async (p) => {
       const feeData = await p.getFeeData();
       const baseFee = feeData.gasPrice ?? feeData.maxFeePerGas ?? 0n;
       const priority = feeData.maxPriorityFeePerGas ?? 0n;
-      const baseFeeGwei = parseFloat(ethers.formatUnits(baseFee, 'gwei')).toFixed(2);
-      const priorityFeeGwei = parseFloat(ethers.formatUnits(priority, 'gwei')).toFixed(2);
-      const totalGwei = parseFloat(ethers.formatUnits(baseFee + priority, 'gwei')).toFixed(2);
-      return { baseFeeGwei, priorityFeeGwei, totalGwei };
+      return {
+        baseFeeGwei:     parseFloat(ethers.formatUnits(baseFee, 'gwei')).toFixed(2),
+        priorityFeeGwei: parseFloat(ethers.formatUnits(priority, 'gwei')).toFixed(2),
+        totalGwei:       parseFloat(ethers.formatUnits(baseFee + priority, 'gwei')).toFixed(2),
+      };
     });
   }
 
-  // ─── Main contract analysis ──────────────────────────────────────────────────
+  // ─── SeaDrop: probe + fetch drop config ───────────────────────────────────
+  private async detectSeaDrop(nftAddress: string, p: ethers.JsonRpcProvider): Promise<{
+    isSeaDrop: boolean;
+    seaDropAddress?: string;
+    mintPrice?: string;
+    priceWei?: string;
+    feeRecipient?: string;
+    maxPerWallet?: number;
+    isPaused?: boolean;
+  }> {
+    const seaDropAddress = SEADROP_ADDRESSES[this.network];
+    if (!seaDropAddress) return { isSeaDrop: false };
+
+    try {
+      // Probe: getMintStats exists only on SeaDrop NFT contracts
+      const nftContract = new ethers.Contract(nftAddress, SEADROP_NFT_ABI, p);
+      await nftContract.getMintStats(ethers.ZeroAddress);
+
+      // Confirmed SeaDrop — pull drop config from the SeaDrop contract
+      const seaDrop = new ethers.Contract(seaDropAddress, SEADROP_ABI, p);
+      const [publicDropResult, feeRecipientsResult] = await Promise.allSettled([
+        seaDrop.getPublicDrop(nftAddress),
+        seaDrop.getFeeRecipients(nftAddress),
+      ]);
+
+      let mintPrice: string | undefined;
+      let priceWei: string | undefined;
+      let feeRecipient: string | undefined;
+      let maxPerWallet: number | undefined;
+      let isPaused = false;
+
+      if (publicDropResult.status === 'fulfilled') {
+        const drop = publicDropResult.value;
+        priceWei  = drop.mintPrice.toString();
+        mintPrice = ethers.formatEther(drop.mintPrice);
+        maxPerWallet = Number(drop.maxTotalMintableByWallet);
+        const now = Math.floor(Date.now() / 1000);
+        isPaused = Number(drop.startTime) > now || (Number(drop.endTime) > 0 && Number(drop.endTime) < now);
+      }
+
+      if (feeRecipientsResult.status === 'fulfilled' && feeRecipientsResult.value.length > 0) {
+        feeRecipient = feeRecipientsResult.value[0];
+      } else {
+        // Fallback to OpenSea's known fee recipient
+        feeRecipient = '0x0000a26b00c1F0DF003000390027140000fAa719';
+      }
+
+      return { isSeaDrop: true, seaDropAddress, mintPrice, priceWei, feeRecipient, maxPerWallet, isPaused };
+    } catch {
+      return { isSeaDrop: false };
+    }
+  }
+
+  // ─── Main contract analysis ───────────────────────────────────────────────
   async analyzeContract(address: string, manualAbi?: string): Promise<ContractInfo> {
     return this.callWithRetry(async (p) => {
       let abi: any[] = [];
       if (manualAbi) {
-        try {
-          abi = JSON.parse(manualAbi);
-        } catch {
-          throw new Error('Invalid manual ABI format');
-        }
+        try { abi = JSON.parse(manualAbi); }
+        catch { throw new Error('Invalid manual ABI format'); }
       } else {
         abi = COMMON_MINT_ABI;
       }
 
-      const contract = new ethers.Contract(address, abi, p);
-      const info: ContractInfo = {
-        address,
-        abi,
-        isVerified: !!manualAbi,
-      };
+      const info: ContractInfo = { address, abi, isVerified: !!manualAbi };
 
-      // ── Parallel multicall for all view functions ──────────────────────────
+      // ── SeaDrop detection first ────────────────────────────────────────────
+      const seaDropInfo = await this.detectSeaDrop(address, p);
+      if (seaDropInfo.isSeaDrop) {
+        info.isSeaDrop          = true;
+        info.seaDropAddress     = seaDropInfo.seaDropAddress;
+        info.seaDropFeeRecipient = seaDropInfo.feeRecipient;
+        info.currentPhase       = 'Public Drop (SeaDrop)';
+        info.mintFunction       = 'mintPublic';
+        info.minQuantity        = 1;
+
+        if (seaDropInfo.mintPrice !== undefined) {
+          info.price    = seaDropInfo.mintPrice;
+          info.priceWei = seaDropInfo.priceWei;
+        }
+        if (seaDropInfo.maxPerWallet !== undefined && seaDropInfo.maxPerWallet > 0) {
+          info.maxQuantity = seaDropInfo.maxPerWallet;
+        }
+        if (seaDropInfo.isPaused !== undefined) info.isPaused = seaDropInfo.isPaused;
+
+        // Supply from getMintStats
+        try {
+          const nftContract = new ethers.Contract(address, SEADROP_NFT_ABI, p);
+          const stats = await nftContract.getMintStats(ethers.ZeroAddress);
+          info.totalSupply = Number(stats.currentTotalSupply);
+          info.maxSupply   = Number(stats.maxSupply);
+        } catch { /* non-fatal */ }
+
+        try { info.gasInfo = await this.getGasInfo(); } catch { /* non-fatal */ }
+        return info;
+      }
+
+      // ── Standard contract analysis ─────────────────────────────────────────
+      const contract = new ethers.Contract(address, abi, p);
+
       const [
         totalSupply, maxSupply, MAX_SUPPLY, totalMinted, _totalMinted, collectionSize, maxTokens,
         paused, isPaused, saleActive, isSaleActive, publicSaleActive, isPublicSaleActive, mintingEnabled, mintEnabled,
@@ -177,59 +259,28 @@ export class MintEngine {
         activeClaimConditionId,
         saleDetails,
       ] = await Promise.allSettled([
-        contract.totalSupply(),
-        contract.maxSupply(),
-        contract.MAX_SUPPLY(),
-        contract.totalMinted(),
-        contract._totalMinted(),
-        contract.collectionSize(),
-        contract.maxTokens(),
-
-        contract.paused(),
-        contract.isPaused(),
-        contract.saleActive(),
-        contract.isSaleActive(),
-        contract.publicSaleActive(),
-        contract.isPublicSaleActive(),
-        contract.mintingEnabled(),
-        contract.mintEnabled(),
-
-        contract.price(),
-        contract.cost(),
-        contract.mintPrice(),
-        contract.publicPrice(),
-        contract.unitPrice(),
-        contract.MINT_PRICE(),
-        contract.PUBLIC_SALE_PRICE(),
-        contract.getPrice(),
-        contract.salePrice(),
-        contract.pricePerToken(),
-        contract.priceInWei(),
-
-        contract.maxPerWallet(),
-        contract.maxMintPerWallet(),
-        contract.walletLimit(),
-        contract.maxPerTransaction(),
-        contract.maxMintPerTx(),
-        contract.maxPerTx(),
-        contract.minMintQuantity(),
-        contract.maxMintQuantity(),
-        contract.MAX_PER_WALLET(),
-        contract.MAX_PER_TX(),
-        contract.mintLimit(),
-
+        contract.totalSupply(), contract.maxSupply(), contract.MAX_SUPPLY(),
+        contract.totalMinted(), contract._totalMinted(), contract.collectionSize(), contract.maxTokens(),
+        contract.paused(), contract.isPaused(), contract.saleActive(), contract.isSaleActive(),
+        contract.publicSaleActive(), contract.isPublicSaleActive(), contract.mintingEnabled(), contract.mintEnabled(),
+        contract.price(), contract.cost(), contract.mintPrice(), contract.publicPrice(),
+        contract.unitPrice(), contract.MINT_PRICE(), contract.PUBLIC_SALE_PRICE(), contract.getPrice(),
+        contract.salePrice(), contract.pricePerToken(), contract.priceInWei(),
+        contract.maxPerWallet(), contract.maxMintPerWallet(), contract.walletLimit(),
+        contract.maxPerTransaction(), contract.maxMintPerTx(), contract.maxPerTx(),
+        contract.minMintQuantity(), contract.maxMintQuantity(), contract.MAX_PER_WALLET(),
+        contract.MAX_PER_TX(), contract.mintLimit(),
         contract.getActiveClaimConditionId(),
         contract.saleDetails(),
       ]);
 
-      // ── Supply ─────────────────────────────────────────────────────────────
+      // Supply
       const supplyVal = [totalSupply, totalMinted, _totalMinted].find(r => r.status === 'fulfilled');
       if (supplyVal?.status === 'fulfilled') info.totalSupply = Number(supplyVal.value);
-
       const maxSupplyVal = [maxSupply, MAX_SUPPLY, collectionSize, maxTokens].find(r => r.status === 'fulfilled');
       if (maxSupplyVal?.status === 'fulfilled') info.maxSupply = Number(maxSupplyVal.value);
 
-      // ── Pause / phase ──────────────────────────────────────────────────────
+      // Pause
       if (paused.status === 'fulfilled') info.isPaused = Boolean(paused.value);
       else if (isPaused.status === 'fulfilled') info.isPaused = Boolean(isPaused.value);
       else if (publicSaleActive.status === 'fulfilled') info.isPaused = !publicSaleActive.value;
@@ -239,98 +290,121 @@ export class MintEngine {
       else if (mintingEnabled.status === 'fulfilled') info.isPaused = !mintingEnabled.value;
       else if (mintEnabled.status === 'fulfilled') info.isPaused = !mintEnabled.value;
 
-      // ── Price — check all variants; pick first non-zero ────────────────────
-      const priceResults = [price, cost, mintPrice, publicPrice, unitPrice, MINT_PRICE, PUBLIC_SALE_PRICE, getPrice, salePrice, pricePerToken, priceInWei];
-      for (const pVal of priceResults) {
+      // Price
+      for (const pVal of [price, cost, mintPrice, publicPrice, unitPrice, MINT_PRICE, PUBLIC_SALE_PRICE, getPrice, salePrice, pricePerToken, priceInWei]) {
         if (pVal.status === 'fulfilled' && pVal.value !== undefined) {
           const formatted = ethers.formatEther(pVal.value);
           if (parseFloat(formatted) >= 0) {
-            info.price = formatted;
+            info.price    = formatted;
             info.priceWei = pVal.value.toString();
             break;
           }
         }
       }
 
-      // ── Quantity limits ────────────────────────────────────────────────────
-      const minQty = minMintQty;
-      if (minQty.status === 'fulfilled') info.minQuantity = Number(minQty.value);
-      else info.minQuantity = 1; // safe default
-
-      const maxQtyResults = [maxPerTransaction, maxMintPerTx, maxPerTx, MAX_PER_TX, maxMintQty, maxPerWallet, maxMintPerWallet, walletLimit, MAX_PER_WALLET, mintLimit];
-      for (const r of maxQtyResults) {
+      // Quantity limits
+      info.minQuantity = minMintQty.status === 'fulfilled' ? Number(minMintQty.value) : 1;
+      for (const r of [maxPerTransaction, maxMintPerTx, maxPerTx, MAX_PER_TX, maxMintQty, maxPerWallet, maxMintPerWallet, walletLimit, MAX_PER_WALLET, mintLimit]) {
         if (r.status === 'fulfilled' && Number(r.value) > 0) {
           info.maxQuantity = Number(r.value);
           break;
         }
       }
 
-      // ── ThirdWeb phased minting — getActiveClaimCondition ──────────────────
+      // ThirdWeb phased
       if (activeClaimConditionId.status === 'fulfilled') {
         try {
           const conditionId = activeClaimConditionId.value;
           const condition = await contract.getClaimConditionById(conditionId);
           info.currentPhase = `Phase ${conditionId.toString()}`;
           if (condition.pricePerToken !== undefined) {
-            info.price = ethers.formatEther(condition.pricePerToken);
+            info.price    = ethers.formatEther(condition.pricePerToken);
             info.priceWei = condition.pricePerToken.toString();
           }
-          if (condition.quantityLimitPerWallet !== undefined) {
-            info.maxQuantity = Number(condition.quantityLimitPerWallet);
-          }
-          if (condition.maxClaimableSupply !== undefined) {
-            info.maxSupply = Number(condition.maxClaimableSupply);
-          }
-          if (condition.supplyClaimed !== undefined) {
-            info.totalSupply = Number(condition.supplyClaimed);
-          }
-          // Phase is paused if startTimestamp is in the future
+          if (condition.quantityLimitPerWallet !== undefined) info.maxQuantity = Number(condition.quantityLimitPerWallet);
+          if (condition.maxClaimableSupply !== undefined)     info.maxSupply   = Number(condition.maxClaimableSupply);
+          if (condition.supplyClaimed !== undefined)          info.totalSupply = Number(condition.supplyClaimed);
           if (condition.startTimestamp !== undefined) {
-            const now = Math.floor(Date.now() / 1000);
-            if (Number(condition.startTimestamp) > now) {
-              info.isPaused = true;
-            }
+            if (Number(condition.startTimestamp) > Math.floor(Date.now() / 1000)) info.isPaused = true;
           }
-        } catch {
-          // ThirdWeb condition fetch failed — continue with what we have
-        }
+        } catch { /* non-fatal */ }
       }
 
-      // ── Zora / Edition saleDetails ─────────────────────────────────────────
+      // Zora
       if (saleDetails.status === 'fulfilled') {
         const sd = saleDetails.value;
         if (sd.publicSaleActive !== undefined) info.isPaused = !sd.publicSaleActive;
         if (sd.publicSalePrice !== undefined && BigInt(sd.publicSalePrice) > 0n) {
-          info.price = ethers.formatEther(sd.publicSalePrice);
+          info.price    = ethers.formatEther(sd.publicSalePrice);
           info.priceWei = sd.publicSalePrice.toString();
         }
-        if (sd.maxSupply !== undefined) info.maxSupply = Number(sd.maxSupply);
-        if (sd.totalMinted !== undefined) info.totalSupply = Number(sd.totalMinted);
-        if (sd.maxSalePurchasePerAddress !== undefined) info.maxQuantity = Number(sd.maxSalePurchasePerAddress);
+        if (sd.maxSupply !== undefined)                  info.maxSupply   = Number(sd.maxSupply);
+        if (sd.totalMinted !== undefined)                info.totalSupply = Number(sd.totalMinted);
+        if (sd.maxSalePurchasePerAddress !== undefined)  info.maxQuantity = Number(sd.maxSalePurchasePerAddress);
         info.currentPhase = sd.presaleActive ? 'Presale' : sd.publicSaleActive ? 'Public Sale' : 'Not Active';
       }
 
-      // ── Live gas info ──────────────────────────────────────────────────────
-      try {
-        info.gasInfo = await this.getGasInfo();
-      } catch {
-        // non-fatal
-      }
+      try { info.gasInfo = await this.getGasInfo(); } catch { /* non-fatal */ }
 
-      // ── Detect mint function ───────────────────────────────────────────────
-      const mintFunctions = ['mint', 'publicMint', 'claim', 'purchase', 'purchaseWithAmount', 'purchaseFor', 'mintPublic', 'mintWithRewards', 'buy', 'freeMint', 'mintFree'];
-      for (const fn of mintFunctions) {
+      // Mint function detection
+      for (const fn of ['mint', 'publicMint', 'claim', 'purchase', 'purchaseWithAmount', 'purchaseFor', 'mintPublic', 'mintWithRewards', 'buy', 'freeMint', 'mintFree']) {
         const fragments = contract.interface.fragments.filter(
           f => f.type === 'function' && (f as ethers.FunctionFragment).name === fn
         );
-        if (fragments.length > 0) {
-          info.mintFunction = fn;
-          break;
-        }
+        if (fragments.length > 0) { info.mintFunction = fn; break; }
       }
 
       return info;
     });
+  }
+
+  // ─── SeaDrop mint execution ───────────────────────────────────────────────
+  private async executeSeaDropMint(
+    wallet: ethers.Wallet,
+    params: MintParams,
+    seaDropAddress: string,
+    feeRecipient: string,
+    onStatusUpdate: (status: Partial<WalletStatus>) => void
+  ): Promise<string> {
+    const seaDrop = new ethers.Contract(seaDropAddress, SEADROP_ABI, wallet);
+    const value   = ethers.parseEther((parseFloat(params.mintPrice) * params.quantity).toFixed(18));
+
+    // Static call simulation
+    try {
+      await seaDrop.mintPublic.staticCall(
+        params.contractAddress, feeRecipient, wallet.address, params.quantity, { value }
+      );
+    } catch (err: any) {
+      throw new Error(this.decodeError(err));
+    }
+
+    const gasEstimate = await seaDrop.mintPublic.estimateGas(
+      params.contractAddress, feeRecipient, wallet.address, params.quantity, { value }
+    );
+
+    const feeData = await this.provider.getFeeData();
+    let maxFeePerGas         = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
+    let maxPriorityFeePerGas = feeData.maxPriorityFeePerGas ?? 0n;
+
+    if (params.gasPreference === 'aggressive') {
+      maxPriorityFeePerGas = (maxPriorityFeePerGas * 300n) / 100n;
+      maxFeePerGas         = (maxFeePerGas * 220n) / 100n;
+    } else if (params.gasPreference === 'standard') {
+      maxPriorityFeePerGas = (maxPriorityFeePerGas * 150n) / 100n;
+      maxFeePerGas         = (maxFeePerGas * 130n) / 100n;
+    }
+
+    onStatusUpdate({ status: 'executing' });
+
+    const tx = await seaDrop.mintPublic(
+      params.contractAddress, feeRecipient, wallet.address, params.quantity,
+      { value, maxFeePerGas, maxPriorityFeePerGas, gasLimit: (gasEstimate * 130n) / 100n }
+    );
+
+    onStatusUpdate({ txHash: tx.hash });
+    const receipt = await tx.wait(1);
+    onStatusUpdate({ status: 'confirmed', gasUsed: receipt?.gasUsed.toString() });
+    return tx.hash;
   }
 
   async simulateMint(
@@ -339,29 +413,24 @@ export class MintEngine {
   ): Promise<{ success: boolean; error?: string; gasEstimate?: bigint }> {
     try {
       const connectedWallet = wallet.connect(this.provider);
-      const abi = params.manualAbi ? JSON.parse(params.manualAbi) : COMMON_MINT_ABI;
+      const abi      = params.manualAbi ? JSON.parse(params.manualAbi) : COMMON_MINT_ABI;
       const contract = new ethers.Contract(params.contractAddress, abi, connectedWallet);
-
       const fragments = contract.interface.fragments.filter(
         f => f.type === 'function' && (f as ethers.FunctionFragment).name === params.functionName
       ) as ethers.FunctionFragment[];
       if (fragments.length === 0) throw new Error(`Function ${params.functionName} not found in ABI`);
 
       const value = ethers.parseEther((parseFloat(params.mintPrice) * params.quantity).toFixed(18));
-
       let lastError: any;
       for (const fragment of fragments) {
         try {
-          const args = this.prepareArgs(fragment, params, wallet.address);
+          const args      = this.prepareArgs(fragment, params, wallet.address);
           const signature = fragment.format();
           await contract[signature].staticCall(...args, { value });
           const gasEstimate = await contract[signature].estimateGas(...args, { value });
           return { success: true, gasEstimate };
-        } catch (e) {
-          lastError = e;
-        }
+        } catch (e) { lastError = e; }
       }
-
       throw lastError || new Error(`Failed to simulate ${params.functionName}`);
     } catch (error: any) {
       return { success: false, error: this.decodeError(error, params.manualAbi) };
@@ -379,15 +448,10 @@ export class MintEngine {
       } else if (input.type === 'uint256') {
         if (fragment.inputs.length === 1) args.push(params.quantity);
         else args.push(0);
-      } else if (input.type === 'bytes32[]') {
-        args.push([]); // empty merkle proof — public mint
-      } else if (input.type === 'bytes') {
-        args.push('0x');
-      } else if (input.type === 'string') {
-        args.push('');
-      } else if (input.type === 'address') {
-        args.push(ethers.ZeroAddress);
-      }
+      } else if (input.type === 'bytes32[]') { args.push([]);
+      } else if (input.type === 'bytes')     { args.push('0x');
+      } else if (input.type === 'string')    { args.push('');
+      } else if (input.type === 'address')   { args.push(ethers.ZeroAddress); }
     });
     return args;
   }
@@ -397,21 +461,28 @@ export class MintEngine {
 
     if (abi && error.data) {
       try {
-        const iface = new ethers.Interface(JSON.parse(abi));
+        const iface   = new ethers.Interface(JSON.parse(abi));
         const decoded = iface.parseError(error.data);
         if (decoded) return `Contract Error: ${decoded.name}(${decoded.args.join(', ')})`;
       } catch { /* ignore */ }
     }
 
-    if (message.includes('insufficient funds')) return 'Insufficient funds for gas + price';
-    if (message.includes('ambiguous function')) return 'Ambiguous function: provide manual ABI';
+    // SeaDrop-specific errors
+    if (message.includes('NotActive') || message.includes('not active'))           return 'SeaDrop: Public drop is not active yet';
+    if (message.includes('InvalidFeeRecipient'))                                   return 'SeaDrop: Invalid fee recipient — re-analyze to refresh';
+    if (message.includes('MintQuantityExceedsMaxMintedPerWallet'))                 return 'SeaDrop: Max per wallet reached';
+    if (message.includes('MintQuantityExceedsMaxSupply'))                          return 'SeaDrop: Sold out / exceeds max supply';
+    if (message.includes('FeeRecipientNotAllowed'))                                return 'SeaDrop: Fee recipient not allowed — re-analyze to refresh';
+
+    if (message.includes('insufficient funds'))   return 'Insufficient funds for gas + price';
+    if (message.includes('ambiguous function'))   return 'Ambiguous function: provide manual ABI';
     if (message.includes('execution reverted')) {
-      if (message.includes('sold out') || message.includes('Sold out')) return 'Mint sold out';
-      if (message.includes('paused') || message.includes('Paused')) return 'Minting is paused';
-      if (message.includes('max supply') || message.includes('MaxSupply')) return 'Exceeds max supply';
+      if (message.includes('sold out') || message.includes('Sold out'))            return 'Mint sold out';
+      if (message.includes('paused') || message.includes('Paused'))               return 'Minting is paused';
+      if (message.includes('max supply') || message.includes('MaxSupply'))         return 'Exceeds max supply';
       if (message.includes('not whitelisted') || message.includes('MerkleProof')) return 'Not whitelisted / not eligible';
       if (message.includes('max per wallet') || message.includes('ExceedsWalletLimit')) return 'Max per wallet reached';
-      if (message.includes('not started') || message.includes('not live')) return 'Sale has not started yet';
+      if (message.includes('not started') || message.includes('not live'))        return 'Sale has not started yet';
       const revertReason = message.split('reverted: ')[1];
       if (revertReason) return `Reverted: ${revertReason.split('\n')[0]}`;
       if (error.data?.startsWith('0x')) return `Reverted with raw data: ${error.data.slice(0, 10)}... (provide manual ABI)`;
@@ -429,89 +500,85 @@ export class MintEngine {
     let attempt = 0;
     while (attempt <= retryCount) {
       try {
-        const wallet = new ethers.Wallet(privateKey, this.provider);
+        const wallet  = new ethers.Wallet(privateKey, this.provider);
         const address = wallet.address;
 
         onStatusUpdate({ address, status: 'preparing' });
-
         const balance = await this.getBalance(address);
         onStatusUpdate({ balance });
 
         const totalCost = parseFloat(params.mintPrice) * params.quantity;
-        if (parseFloat(balance) < totalCost) {
-          throw new Error('Insufficient funds for mint price');
+        if (parseFloat(balance) < totalCost) throw new Error('Insufficient funds for mint price');
+
+        // ── SeaDrop path ───────────────────────────────────────────────────
+        const seaDropInfo = await this.detectSeaDrop(params.contractAddress, this.provider);
+        if (seaDropInfo.isSeaDrop && seaDropInfo.seaDropAddress && seaDropInfo.feeRecipient) {
+          onStatusUpdate({ status: 'simulating' });
+          return await this.executeSeaDropMint(
+            wallet, params, seaDropInfo.seaDropAddress, seaDropInfo.feeRecipient, onStatusUpdate
+          );
         }
 
+        // ── Standard path ──────────────────────────────────────────────────
         onStatusUpdate({ status: 'simulating' });
         const sim = await this.simulateMint(wallet, params);
         if (!sim.success) throw new Error(sim.error);
 
         onStatusUpdate({ status: 'executing' });
-
-        const abi = params.manualAbi ? JSON.parse(params.manualAbi) : COMMON_MINT_ABI;
+        const abi      = params.manualAbi ? JSON.parse(params.manualAbi) : COMMON_MINT_ABI;
         const contract = new ethers.Contract(params.contractAddress, abi, wallet);
-
         const fragments = contract.interface.fragments.filter(
           f => f.type === 'function' && (f as ethers.FunctionFragment).name === params.functionName
         ) as ethers.FunctionFragment[];
         if (fragments.length === 0) throw new Error(`Function ${params.functionName} not found`);
 
         const value = ethers.parseEther(totalCost.toFixed(18));
-
-        // Find working fragment (same logic as simulation — guaranteed to match)
         let workingFragment: ethers.FunctionFragment | null = null;
         let workingArgs: any[] = [];
 
         for (const fragment of fragments) {
           try {
-            const args = this.prepareArgs(fragment, params, address);
+            const args      = this.prepareArgs(fragment, params, address);
             const signature = fragment.format();
             await contract[signature].staticCall(...args, { value });
             workingFragment = fragment;
-            workingArgs = args;
+            workingArgs     = args;
             break;
           } catch { continue; }
         }
-
         if (!workingFragment) throw new Error(`No valid signature found for ${params.functionName}`);
 
-        // ── Gas — fetch once and apply strategy ─────────────────────────────
         const feeData = await this.provider.getFeeData();
-        let maxFeePerGas = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
+        let maxFeePerGas         = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
         let maxPriorityFeePerGas = feeData.maxPriorityFeePerGas ?? 0n;
 
         if (params.gasPreference === 'aggressive') {
-          maxPriorityFeePerGas = (maxPriorityFeePerGas * 300n) / 100n; // 3× priority for speed
-          maxFeePerGas = (maxFeePerGas * 220n) / 100n;
+          maxPriorityFeePerGas = (maxPriorityFeePerGas * 300n) / 100n;
+          maxFeePerGas         = (maxFeePerGas * 220n) / 100n;
         } else if (params.gasPreference === 'standard') {
           maxPriorityFeePerGas = (maxPriorityFeePerGas * 150n) / 100n;
-          maxFeePerGas = (maxFeePerGas * 130n) / 100n;
+          maxFeePerGas         = (maxFeePerGas * 130n) / 100n;
         }
-        // 'low' keeps feeData as-is
 
         const signature = workingFragment.format();
-
-        // ── Submit transaction (no await on .wait() here — fire fast) ────────
         const tx = await contract[signature](...workingArgs, {
-          value,
-          maxFeePerGas,
-          maxPriorityFeePerGas,
-          gasLimit: (sim.gasEstimate! * 130n) / 100n, // tighter buffer = faster inclusion
+          value, maxFeePerGas, maxPriorityFeePerGas,
+          gasLimit: (sim.gasEstimate! * 130n) / 100n,
         });
 
         onStatusUpdate({ txHash: tx.hash });
-
-        // Wait for 1 confirmation only — fast confirmation
         const receipt = await tx.wait(1);
         onStatusUpdate({ status: 'confirmed', gasUsed: receipt?.gasUsed.toString() });
-
         return tx.hash;
+
       } catch (error: any) {
         const decodedError = this.decodeError(error, params.manualAbi);
         if (
           attempt < retryCount &&
           !decodedError.includes('Insufficient funds') &&
-          !decodedError.includes('Max per wallet')
+          !decodedError.includes('Max per wallet') &&
+          !decodedError.includes('Sold out') &&
+          !decodedError.includes('sold out')
         ) {
           attempt++;
           await new Promise(r => setTimeout(r, 800 * attempt));
