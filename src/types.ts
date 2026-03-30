@@ -38,6 +38,7 @@ export interface ContractInfo {
   address: string;
   abi: any[];
   isVerified: boolean;
+  contractType?: 'seadrop' | 'thirdweb' | 'generic';
   mintFunction?: string;
 
   // Price
@@ -56,11 +57,15 @@ export interface ContractInfo {
   minQuantity?: number;
   maxQuantity?: number;
 
-  // Live gas
+  // Gas
   gasInfo?: GasInfo;
 
   // SeaDrop
   isSeaDrop?: boolean;
   seaDropAddress?: string;
   seaDropFeeRecipient?: string;
+
+  // ThirdWeb
+  thirdwebConditionId?: string;
+  thirdwebCondition?: any;
 }
